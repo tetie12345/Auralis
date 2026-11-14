@@ -44,38 +44,71 @@ const Settings = {
 Settings.load();
 
 /* ------------------------------------------------------------- Apple bridge */
+/* Persistent tap into the Apple player's internal event dispatcher. This is
+   the authoritative source: playbackTimeDidChange carries exact time+duration,
+   and music may flow through a muted media element (WebAudio graph), so any
+   element-sniffing heuristic is unreliable. Reinstalled after page reloads. */
+const TAP_JS = `(() => {
+  try {
+    const mk = window.MusicKit && MusicKit.getInstance ? MusicKit.getInstance() : null;
+    if (!mk || !mk.services || !mk.services.dispatcher) return 'no-mk';
+    if (window.__auralisTap) return 'already';
+    window.__auralisTap = true;
+    window.__auralisState = {
+      authorized: !!mk.isAuthorized, state: mk.playbackState,
+      time: 0, dur: 0, vol: mk.volume == null ? 1 : mk.volume,
+      shuffle: mk.shuffleMode === 1,
+      sf: mk.storefrontId || (mk.services.mediaAPIAccess && mk.services.mediaAPIAccess.storefrontId) || '',
+      item: null,
+    };
+    const snap = () => {
+      try {
+        const q = mk.queue; const pos = q._position;
+        const entry = (q._queueItems && pos >= 0) ? q._queueItems[pos] : null;
+        const item = entry && (entry.item || entry.mediaItem || entry);
+        const a = item && item.attributes;
+        window.__auralisState.item = a ? {
+          id: item.id || '',
+          cid: (a.playParams && a.playParams.catalogId) || (a.playParams && a.playParams.id) || item.id || '',
+          title: a.name || '', artist: a.artistName || '', album: a.albumName || '',
+          art: (a.artwork && a.artwork.url) || '', ms: a.durationInMillis || 0,
+        } : null;
+        window.__auralisState.authorized = !!mk.isAuthorized;
+        window.__auralisState.vol = mk.volume == null ? 1 : mk.volume;
+        window.__auralisState.shuffle = mk.shuffleMode === 1;
+        window.__auralisState.sf = mk.storefrontId || window.__auralisState.sf;
+        window.__auralisState.state = mk.playbackState;
+      } catch (e) {}
+    };
+    window.__auralisSnap = snap; snap();
+    const d = mk.services.dispatcher;
+    const orig = d.publish.bind(d);
+    d.publish = function (topic, msg) {
+      try {
+        const p = msg && msg.payload !== undefined ? msg.payload : msg;
+        if (topic === 'playbackTimeDidChange' && p) {
+          window.__auralisState.time = p.currentPlaybackTime || 0;
+          window.__auralisState.dur = p.currentPlaybackDuration || 0;
+        } else if (/^(playbackStateDidChange|playbackPlay|playbackPause|playbackStop|playbackBuffer)/.test(topic)) {
+          window.__auralisState.state = mk.playbackState;
+          snap();
+        } else if (/queue/i.test(topic)) {
+          snap();
+        }
+      } catch (e) {}
+      return orig(topic, msg);
+    };
+    return 'installed';
+  } catch (e) { return 'ERR ' + (e && e.message || e); }
+})()`;
+
 const STATE_JS = `(() => {
   try {
     const mk = window.MusicKit && MusicKit.getInstance ? MusicKit.getInstance() : null;
     if (!mk) return JSON.stringify({ ok: false });
-    // "playback" build of the web player: no mk.player; live state lives in
-    // services.mediaItemPlayback.currentPlayback and queue internals.
-    const mp = mk.services && mk.services.mediaItemPlayback;
-    const cp = mp && mp.currentPlayback;
-    const q = mk.queue;
-    const pos = q ? q._position : -1;
-    const entry = (q && q._queueItems && pos >= 0) ? q._queueItems[pos] : null;
-    const item = (cp && cp.currentMediaItem) || (entry && (entry.item || entry.mediaItem || entry));
-    const a = item ? (item.attributes || null) : null;
-    // playback time lives on the media element in this build (currentPlayback
-    // only carries {asset, item, userInitiated})
-    const aud = [...document.querySelectorAll('audio,video')].find((e) => !e.muted && e.currentTime > 0)
-      || document.querySelector('audio');
-    return JSON.stringify({ ok: true,
-      authorized: !!mk.isAuthorized,
-      state: mk.playbackState,
-      time: (aud && aud.currentTime) || (cp && cp.playbackTime) || 0,
-      dur: (cp && cp.duration) || 0,
-      vol: mk.volume == null ? 1 : mk.volume,
-      shuffle: mk.shuffleMode === 1,
-      sf: mk.storefrontId || (mk.services.mediaAPIAccess && mk.services.mediaAPIAccess.storefrontId) || '',
-      item: a ? {
-        id: item.id || '',
-        cid: (a.playParams && a.playParams.catalogId) || (a.playParams && a.playParams.id) || item.id || '',
-        title: a.name || '', artist: a.artistName || '', album: a.albumName || '',
-        art: (a.artwork && a.artwork.url) || '',
-        ms: a.durationInMillis || 0
-      } : null });
+    if (!window.__auralisTap) return JSON.stringify({ ok: false, needTap: true });
+    if (window.__auralisSnap) window.__auralisSnap();
+    return JSON.stringify(Object.assign({ ok: true }, window.__auralisState));
   } catch (e) { return JSON.stringify({ ok: false, err: String(e && e.message || e) }); }
 })()`;
 
@@ -110,7 +143,9 @@ const Apple = {
       : `songs:${JSON.stringify(ids)},startPlaying:true`;
     return this.exec(`MusicKit.getInstance().setQueue({${params}}).then(()=>"ok").catch(e=>"ERR "+(e&&e.message||e))`);
   },
-  toggle() { return this.exec('const mk=MusicKit.getInstance();try{(mk.playbackState===2?mk.pause():mk.play()).then(()=>"ok").catch(e=>"ERR "+e)}catch(e){return "ERR "+e}'); },
+  toggle() {
+    return this.exec('(() => { const mk = MusicKit.getInstance(); return (mk.playbackState === 2 ? mk.pause() : mk.play()).then(() => "ok").catch(e => "ERR " + e); })()');
+  },
   next() { return this.exec('MusicKit.getInstance().skipToNextItem().then(()=>"ok").catch(e=>"ERR "+e)'); },
   prev() { return this.exec('MusicKit.getInstance().skipToPreviousItem().then(()=>"ok").catch(e=>"ERR "+e)'); },
   seek(t) { return this.exec(`MusicKit.getInstance().seekToTime(${Number(t) || 0})`); },
@@ -177,12 +212,19 @@ async function refreshNowPlaying() {
   const key = it.cid || it.id;
   if (key && State.lyricKey !== key) {
     State.lyricKey = key;
-    Lyrics.set(key, null);
+    Lyrics.set(key, lyricsCache.has(key) ? lyricsCache.get(key) : null);
     loadLyrics(it, key);
+    prefetchNext();
   }
 }
 
+const lyricsCache = new Map(); // catalogId -> parsed lines
+
 async function loadLyrics(it, key) {
+  if (lyricsCache.has(key)) {
+    Lyrics.set(key, lyricsCache.get(key));
+    return;
+  }
   let parsed = null;
   try {
     const json = await Apple.api(`/v1/catalog/${Apple.sf}/songs/${key}?extend=lyrics&l=en-US`);
@@ -202,7 +244,30 @@ async function loadLyrics(it, key) {
       if (best) parsed = Lyrics.parseLRC(best.syncedLyrics);
     } catch {}
   }
+  if (parsed) lyricsCache.set(key, parsed);
   if (State.lyricKey === key) Lyrics.set(key, parsed);
+}
+
+/* warm the caches for the next queue entry so switching tracks feels instant */
+async function prefetchNext() {
+  try {
+    const q = JSON.parse(await Apple.exec(QUEUE_JS));
+    if (!q.items || q.pos < 0) return;
+    const next = q.items[q.pos + 1];
+    if (!next || !next.id) return;
+    if (!lyricsCache.has(next.id)) {
+      // resolve catalog id, fetch lyrics quietly
+      const key = next.id;
+      try {
+        const json = await Apple.api(`/v1/catalog/${Apple.sf}/songs/${key}?extend=lyrics&l=en-US`);
+        const parsed = Lyrics.parse(json);
+        if (parsed) lyricsCache.set(key, parsed);
+      } catch {}
+    }
+    if (next.art) {
+      window.auralis.fetchArt(next.art.replace('{w}', '600').replace('{h}', '600'));
+    }
+  } catch {}
 }
 
 function applyPalette(dataUrl) {
@@ -650,7 +715,25 @@ function toggleFullscreen() {
   }
 }
 
-/* -------------------------------------------------------------------- init */
+/* play/pause driven by our own playing-detection (playbackState is 0 even
+   while audio plays through the muted-element WebAudio path) */
+function togglePlay() {
+  const wasPlaying = State.playing;
+  if (!wasPlaying && !State.item) { toast('Nothing to play yet'); return; }
+  $('#pb-play').innerHTML = wasPlaying ? '&#x25B6;' : '&#x23F8;';
+  // IIFE: a bare `const mk` would pollute the webview's global scope and make
+  // every subsequent command throw "already declared"
+  Apple.exec(`(() => { const mk=MusicKit.getInstance(); try { return (${wasPlaying ? 'mk.pause()' : 'mk.play()'}).then(()=>'ok').catch(e=>'ERR '+e); } catch(e) { return 'ERR '+String(e); } })()`)
+    .then((r) => {
+      // play() with an empty/stale queue fails — fall back to the last track
+      if (r && String(r).startsWith('ERR') && !wasPlaying && State.item) {
+        Apple.play([State.item.cid]);
+      }
+    })
+    .catch((e) => console.warn('togglePlay failed:', e));
+}
+
+/* ------------------------------------------------------------------ init */
 async function init() {
   Apple.init();
   applySettings();
@@ -695,13 +778,7 @@ async function init() {
   });
 
   // transport
-  $('#pb-play').addEventListener('click', () => {
-    if (!State.playing && !State.item) { toast('Nothing to play yet'); return; }
-    // optimistic icon swap; the 500 ms poll corrects it
-    const willPlay = !State.playing;
-    $('#pb-play').innerHTML = willPlay ? '&#x23F8;' : '&#x25B6;';
-    Apple.exec('const mk=MusicKit.getInstance();(mk.playbackState===2?mk.pause():mk.play()).then(()=>"ok").catch(e=>"ERR "+e)');
-  });
+  $('#pb-play').addEventListener('click', togglePlay);
   $('#pb-next').addEventListener('click', () => Apple.next());
   $('#pb-prev').addEventListener('click', () => Apple.prev());
   $('#pb-seek').addEventListener('input', () => { State.seeking = true; $('#pb-time').textContent = fmtTime(($('#pb-seek').value / 1000) * State.dur); paintRange($('#pb-seek')); });
@@ -759,7 +836,7 @@ async function init() {
       if (e.key === 'Escape') e.target.blur();
       return;
     }
-    if (e.code === 'Space') { e.preventDefault(); Apple.toggle(); }
+    if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
     else if (e.key === 'ArrowRight') Apple.seek(State.time + 10);
     else if (e.key === 'ArrowLeft') Apple.seek(Math.max(0, State.time - 10));
     else if (e.key === 'v' || e.key === 'V') cycleViz();
@@ -781,7 +858,11 @@ async function init() {
     return;
   }
   setInterval(async () => {
-    try { handleState(JSON.parse(await Apple.exec(STATE_JS))); } catch {}
+    try {
+      const s = JSON.parse(await Apple.exec(STATE_JS));
+      if (s.needTap) { await Apple.exec(TAP_JS); return; }
+      handleState(s);
+    } catch {}
   }, 500);
   showWebview(); // let the user sign in (hidden again once authorized)
 }

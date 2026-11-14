@@ -122,13 +122,19 @@ ipcMain.handle('open-external', (_e, url) => {
   if (/^https?:\/\//.test(url) && !isAppleUrl(url)) shell.openExternal(url);
 });
 
+const artCache = new Map(); // url -> dataURL
+
 ipcMain.handle('art:fetch', async (_e, url) => {
+  if (artCache.has(url)) return artCache.get(url);
   try {
     const res = await fetch(url);
     if (!res.ok) return null;
     const buf = Buffer.from(await res.arrayBuffer());
     const type = res.headers.get('content-type') || 'image/jpeg';
-    return `data:${type};base64,${buf.toString('base64')}`;
+    const data = `data:${type};base64,${buf.toString('base64')}`;
+    if (artCache.size > 40) artCache.delete(artCache.keys().next().value);
+    artCache.set(url, data);
+    return data;
   } catch {
     return null;
   }
