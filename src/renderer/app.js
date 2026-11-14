@@ -1,0 +1,632 @@
+'use strict';
+/* Auralis renderer — drives the embedded Apple Music player (MusicKit JS in
+   the webview) and renders the custom UI on top of it. */
+
+const $ = (s) => document.querySelector(s);
+const $$ = (s) => [...document.querySelectorAll(s)];
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  return n;
+}
+function fmtTime(s) {
+  s = Math.max(0, Math.floor(s || 0));
+  const m = Math.floor(s / 60), ss = s % 60;
+  return `${m}:${String(ss).padStart(2, '0')}`;
+}
+let toastTimer = null;
+function toast(msg, ms = 2600) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), ms);
+}
+
+/* ------------------------------------------------------------------ settings */
+const Settings = {
+  viz: 'auto',
+  accent: 'artwork',
+  lyrSize: 19,
+  source: '',
+  load() {
+    try { Object.assign(this, JSON.parse(localStorage.getItem('auralis:settings') || '{}')); } catch {}
+  },
+  save() {
+    localStorage.setItem('auralis:settings', JSON.stringify({
+      viz: this.viz, accent: this.accent, lyrSize: this.lyrSize, source: this.source,
+    }));
+  },
+};
+Settings.load();
+
+/* ------------------------------------------------------------- Apple bridge */
+const STATE_JS = `(() => {
+  try {
+    const mk = window.MusicKit && MusicKit.getInstance ? MusicKit.getInstance() : null;
+    if (!mk || !mk.player) return JSON.stringify({ ok: false });
+    const p = mk.player();
+    const ci = p.currentMediaItem;
+    const a = ci ? ci.attributes : null;
+    return JSON.stringify({ ok: true,
+      authorized: !!mk.isAuthorized,
+      state: p.playbackState,
+      time: p.playbackTime || 0,
+      dur: p.currentPlaybackDuration || 0,
+      vol: p.volume == null ? 1 : p.volume,
+      item: a ? {
+        id: ci.id || '',
+        cid: (a.playParams && a.playParams.catalogId) || (a.playParams && a.playParams.id) || '',
+        title: a.name || '', artist: a.artistName || '', album: a.albumName || '',
+        art: (a.artwork && a.artwork.url) || '',
+        ms: a.durationInMillis || 0
+      } : null });
+  } catch (e) { return JSON.stringify({ ok: false, err: String(e && e.message || e) }); }
+})()`;
+
+const Apple = {
+  wv: null,
+  ready: false,
+  sf: 'us',
+  init() { this.wv = $('#apple'); },
+  exec(code) { return this.wv.executeJavaScript(code, false); },
+  async waitReady(timeoutMs = 120000) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeoutMs) {
+      try {
+        if (await this.exec('!!(window.MusicKit&&MusicKit.getInstance&&MusicKit.getInstance().api)')) {
+          this.ready = true;
+          this.sf = (await this.exec('(window.MusicKit&&MusicKit.getInstance().storefrontId)||"us"')) || 'us';
+          return true;
+        }
+      } catch {}
+      await sleep(700);
+    }
+    return false;
+  },
+  api(path) {
+    // MusicKit JS wraps responses: { url, status, json (parsed body), ... }
+    return this.exec(`MusicKit.getInstance().api.music(${JSON.stringify(path)}).then(r=>(r&&r.json)?r.json:r)`);
+  },
+  play(ids, startIdx = 0) {
+    if (!ids || !ids.length) return;
+    const js = startIdx
+      ? `MusicKit.getInstance().setQueue({songs:${JSON.stringify(ids)}}).then(()=>MusicKit.getInstance().player.changeToMediaAtIndex(${startIdx})).then(()=>MusicKit.getInstance().play()).then(()=>"ok").catch(e=>"ERR "+(e&&e.message||e))`
+      : `MusicKit.getInstance().setQueue({songs:${JSON.stringify(ids)}}).then(()=>MusicKit.getInstance().play()).then(()=>"ok").catch(e=>"ERR "+(e&&e.message||e))`;
+    return this.exec(js);
+  },
+  toggle() { return this.exec('const mk=MusicKit.getInstance();(mk.playbackState===2?mk.pause():mk.play()).then(()=>"ok").catch(e=>"ERR "+e)'); },
+  next() { return this.exec('MusicKit.getInstance().skipToNext().then(()=>"ok").catch(e=>"ERR "+e)'); },
+  prev() { return this.exec('MusicKit.getInstance().skipToPrevious().then(()=>"ok").catch(e=>"ERR "+e)'); },
+  seek(t) { return this.exec(`MusicKit.getInstance().seekToTime(${Number(t) || 0})`); },
+  setVol(v) { return this.exec(`MusicKit.getInstance().volume=${Number(v)}`); },
+};
+
+/* -------------------------------------------------------------------- state */
+const State = {
+  auth: false,
+  item: null,
+  playing: false,
+  time: 0,
+  dur: 0,
+  lastItemId: null,
+  seeking: false,
+  webviewShown: false,
+  lyricKey: '',
+};
+
+/* -------------------------------------------------------------------- views */
+function setView(name) {
+  State.view = name;
+  for (const s of $$('.view')) s.classList.add('hidden');
+  const target = $('#view-' + name);
+  if (target) target.classList.remove('hidden');
+  for (const b of $$('.nav-item')) b.classList.toggle('active', b.dataset.view === name);
+  for (const v of Viz.registry) v.visible = v.mini; // mini strip stays on
+  if (name === 'now') {
+    const main = Viz.registry.find((v) => v.cv.id === 'viz-main');
+    if (main) main.visible = true;
+  }
+}
+let volumeDragging = false;
+
+/* ------------------------------------------------------------ now playing UI */
+async function refreshNowPlaying() {
+  const it = State.item;
+  if (!it) return;
+  $('#now-title').textContent = it.title;
+  $('#now-artist').textContent = [it.artist, it.album].filter(Boolean).join(' — ');
+  $('#pb-title').textContent = it.title;
+  $('#pb-artist').textContent = it.artist;
+
+  // artwork
+  if (it.art) {
+    const url = it.art.replace('{w}', '600').replace('{h}', '600');
+    if (State.lastItemId !== it.id) {
+      const dataUrl = await window.auralis.fetchArt(url);
+      if (dataUrl) {
+        $('#now-art').src = dataUrl;
+        $('#pb-art').src = dataUrl;
+        if (Settings.accent === 'artwork') applyPalette(dataUrl);
+      }
+    }
+  } else {
+    $('#now-art').removeAttribute('src');
+  }
+
+  // lyrics
+  const key = it.cid || it.id;
+  if (key && State.lyricKey !== key) {
+    State.lyricKey = key;
+    Lyrics.set(key, null);
+    loadLyrics(it, key);
+  }
+}
+
+async function loadLyrics(it, key) {
+  let parsed = null;
+  try {
+    const json = await Apple.api(`/v1/catalog/${Apple.sf}/songs/${key}?extend=lyrics&l=en-US`);
+    parsed = Lyrics.parse(json);
+  } catch {}
+  if (!parsed) {
+    // Fallback: LRCLIB (free synced-lyrics database, timestamped LRC)
+    try {
+      const q = `track_name=${encodeURIComponent(it.title)}&artist_name=${encodeURIComponent(it.artist || '')}`;
+      const res = await fetch('https://lrclib.net/api/search?' + q);
+      const arr = await res.json();
+      const dur = (it.ms || 0) / 1000 || State.dur || 0;
+      const cands = (arr || []).filter((x) => x.syncedLyrics &&
+        (!dur || !x.duration || Math.abs(x.duration - dur) < 14));
+      const best = cands.sort((a, b) =>
+        Math.abs((a.duration || 0) - dur) - Math.abs((b.duration || 0) - dur))[0];
+      if (best) parsed = Lyrics.parseLRC(best.syncedLyrics);
+    } catch {}
+  }
+  if (State.lyricKey === key) Lyrics.set(key, parsed);
+}
+
+function applyPalette(dataUrl) {
+  Palette.extract(dataUrl).then((pal) => {
+    if (!pal) return;
+    const r = document.documentElement.style;
+    r.setProperty('--accent', pal.accent);
+    r.setProperty('--accent2', pal.accent2);
+    r.setProperty('--tint', pal.tint);
+    window.__vizPalette = pal.viz;
+  });
+}
+
+function fixedPalette() {
+  const r = document.documentElement.style;
+  r.setProperty('--accent', '#6d7dff');
+  r.setProperty('--accent2', '#9b8cff');
+  r.setProperty('--tint', 'rgba(109,125,255,0.10)');
+  window.__vizPalette = { accent: [110, 125, 255], accent2: [155, 140, 255], bg: [10, 12, 18] };
+}
+
+/* -------------------------------------------------------------------- cards */
+function artworkUrl(a, size = 300) {
+  if (!a || !a.url) return null;
+  return a.url.replace('{w}', String(size)).replace('{h}', String(size)).replace('{f}', 'jpg');
+}
+
+async function artSrc(attrs, size) {
+  const u = artworkUrl(attrs.artwork, size);
+  if (!u) return null;
+  const d = await window.auralis.fetchArt(u);
+  return d;
+}
+
+async function makeCard(item, { round = false } = {}) {
+  const card = el('div', 'card');
+  const cls = 'card-art' + (round ? ' sq' : '');
+  const src = await artSrc(item.attributes, 300);
+  if (src) {
+    const img = el('img', cls);
+    img.src = src;
+    card.appendChild(img);
+  } else {
+    const ph = el('div', cls);
+    ph.style.background = 'linear-gradient(135deg,#1c2030,#12141c)';
+    card.appendChild(ph);
+  }
+  card.appendChild(el('div', 'card-title', item.attributes.name || ''));
+  card.appendChild(el('div', 'card-sub',
+    item.attributes.artistName || item.attributes.curatorName || item.type.replace('-', ' ')));
+  card.addEventListener('click', () => openItem(item));
+  return card;
+}
+
+function kindOf(item) {
+  const t = item.type;
+  if (t === 'playlists' || t === 'library-playlists') return 'playlist';
+  if (t === 'albums' || t === 'library-albums') return 'album';
+  if (t === 'artists' || t === 'library-artists') return 'artist';
+  if (t === 'songs' || t === 'library-songs') return 'song';
+  if (t === 'stations') return 'station';
+  return t;
+}
+
+/* resolve playable song ids for a playlist/album/artist */
+async function trackIds(item) {
+  const kind = kindOf(item);
+  const id = item.id;
+  const sf = Apple.sf;
+  let path = null;
+  if (kind === 'playlist') {
+    path = id.startsWith('p.')
+      ? `/v1/me/library/playlists/${id}/tracks?limit=100`
+      : `/v1/catalog/${sf}/playlists/${id}/tracks?limit=100`;
+  } else if (kind === 'album') {
+    path = id.startsWith('p.') || id.startsWith('l.')
+      ? `/v1/me/library/albums/${id}/tracks?limit=100`
+      : `/v1/catalog/${sf}/albums/${id}/tracks?limit=100`;
+  } else if (kind === 'artist') {
+    path = `/v1/catalog/${sf}/artists/${id}/songs?limit=50`;
+  }
+  if (!path) return null;
+  try {
+    const res = await Apple.api(path);
+    const data = (res && res.data) || [];
+    const ids = data
+      .map((t) => (t.attributes && t.attributes.playParams && t.attributes.playParams.catalogId) ||
+        (t.attributes && t.attributes.playParams && t.attributes.playParams.id) || t.id)
+      .filter((x) => x);
+    return ids;
+  } catch (e) {
+    console.warn('trackIds failed', e);
+    return null;
+  }
+}
+
+async function openItem(item) {
+  const kind = kindOf(item);
+  if (kind === 'song') {
+    toast('Playing “' + item.attributes.name + '”');
+    Apple.play([item.attributes.playParams?.catalogId || item.id]);
+  } else {
+    toast('Loading ' + (item.attributes.name || '') + '…');
+    const ids = await trackIds(item);
+    if (ids && ids.length) {
+      Apple.play(ids);
+      toast('Queued ' + ids.length + ' tracks');
+    } else toast('Could not load this ' + kind);
+  }
+}
+
+/* ------------------------------------------------------------------ shelves */
+function addShelf(container, title, items, opts) {
+  if (!items.length) return;
+  const shelf = el('div', 'shelf');
+  shelf.appendChild(el('h3', null, title));
+  const row = el('div', 'shelf-row');
+  shelf.appendChild(row);
+  container.appendChild(shelf);
+  (async () => {
+    for (const it of items) row.appendChild(await makeCard(it, opts));
+  })();
+}
+
+/* -------------------------------------------------------------------- home */
+async function loadHome() {
+  const box = $('#home-rows');
+  box.innerHTML = '<p class="muted">Loading recommendations…</p>';
+  try {
+    const res = await Apple.api(`/v1/me/recommendations?limit=8`);
+    box.innerHTML = '';
+    const recs = res.data || [];
+    let n = 0;
+    for (const rec of recs) {
+      const rel = rec.relationships && rec.relationships.contents;
+      const items = ((rel && rel.data) || []).filter((i) => kindOf(i) !== 'station');
+      if (!items.length) continue;
+      const title = (rec.attributes && rec.attributes.title) || (n === 0 ? 'Made for you' : 'Recommended');
+      addShelf(box, title, items);
+      n++;
+    }
+    if (!n) {
+      box.innerHTML = '<p class="muted">No recommendations yet — play something or open your Library.</p>';
+      const lib = await Apple.api('/v1/me/library/playlists?limit=20').catch(() => null);
+      if (lib && lib.data && lib.data.length) addShelf(box, 'Your playlists', lib.data);
+    }
+  } catch (e) {
+    box.innerHTML = '<p class="muted">Could not load recommendations: ' + (e.message || e) + '</p>';
+  }
+}
+
+/* ------------------------------------------------------------------ search */
+let searchTimer = null;
+function wireSearch() {
+  const input = $('#search-input');
+  input.addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    const term = input.value.trim();
+    if (term.length < 2) { $('#search-results').innerHTML = ''; return; }
+    searchTimer = setTimeout(() => doSearch(term), 350);
+  });
+}
+
+async function doSearch(term) {
+  const box = $('#search-results');
+  box.innerHTML = '<p class="muted">Searching…</p>';
+  try {
+    const res = await Apple.api(
+      `/v1/catalog/${Apple.sf}/search?term=${encodeURIComponent(term)}&limit=24&types=songs,playlists,albums,artists`);
+    box.innerHTML = '';
+    const results = res.results || {};
+    let songIds = [];
+    const songs = (results.songs && results.songs.data) || [];
+    if (songs.length) {
+      songIds = songs.map((s) => s.id);
+      const sec = el('div', 'results-section');
+      sec.appendChild(el('h3', null, 'Songs'));
+      songs.forEach((s, i) => {
+        const row = el('div', 'row-song');
+        const img = el('img', 'row-art');
+        artSrc(s.attributes, 100).then((d) => { if (d) img.src = d; });
+        row.appendChild(el('span', 'row-idx', String(i + 1)));
+        row.appendChild(img);
+        const main = el('div', 'row-main');
+        main.appendChild(el('div', 'row-title', s.attributes.name));
+        main.appendChild(el('div', 'row-sub', s.attributes.artistName || ''));
+        row.appendChild(main);
+        row.appendChild(el('span', 'row-dur', fmtTime((s.attributes.durationInMillis || 0) / 1000)));
+        row.addEventListener('click', () => Apple.play(songIds, i));
+        sec.appendChild(row);
+      });
+      box.appendChild(sec);
+    }
+    for (const [key, label] of [['playlists', 'Playlists'], ['albums', 'Albums'], ['artists', 'Artists']]) {
+      const data = (results[key] && results[key].data) || [];
+      if (data.length) addShelf(box, label, data, { round: key === 'artists' });
+    }
+    if (!box.childNodes.length) box.innerHTML = '<p class="muted">No results.</p>';
+  } catch (e) {
+    box.innerHTML = '<p class="muted">Search failed: ' + (e.message || e) + '</p>';
+  }
+}
+
+/* ----------------------------------------------------------------- library */
+let libTab = 'playlists';
+async function loadLibrary() {
+  const box = $('#library-content');
+  box.innerHTML = '<p class="muted">Loading library…</p>';
+  try {
+    if (libTab === 'playlists') {
+      const res = await Apple.api('/v1/me/library/playlists?limit=100');
+      box.innerHTML = '';
+      const data = res.data || [];
+      if (!data.length) { box.innerHTML = '<p class="muted">No playlists yet.</p>'; return; }
+      for (const pl of data) box.appendChild(await makeCard(pl));
+    } else {
+      const res = await Apple.api('/v1/me/library/songs?limit=100');
+      box.innerHTML = '';
+      const data = res.data || [];
+      if (!data.length) { box.innerHTML = '<p class="muted">No songs in your library.</p>'; return; }
+      const ids = data.map((s) => (s.attributes && s.attributes.playParams && s.attributes.playParams.catalogId) || s.id);
+      data.forEach((s, i) => {
+        const row = el('div', 'row-song');
+        row.appendChild(el('span', 'row-idx', String(i + 1)));
+        const main = el('div', 'row-main');
+        main.appendChild(el('div', 'row-title', s.attributes.name));
+        main.appendChild(el('div', 'row-sub', s.attributes.artistName || ''));
+        row.appendChild(main);
+        row.appendChild(el('span', 'row-dur', fmtTime((s.attributes.durationInMillis || 0) / 1000)));
+        row.addEventListener('click', () => Apple.play(ids, i));
+        box.appendChild(row);
+      });
+      box.style.flexDirection = 'column';
+    }
+  } catch (e) {
+    box.innerHTML = '<p class="muted">Could not load library: ' + (e.message || e) + '</p>';
+  }
+}
+
+/* ------------------------------------------------------------- state polling */
+function handleState(s) {
+  if (!s || !s.ok) return;
+  const wasAuth = State.auth;
+  State.auth = !!s.authorized;
+  if (State.auth !== wasAuth) {
+    $('#auth-chip').classList.toggle('on', State.auth);
+    $('#auth-chip').classList.toggle('off', !State.auth);
+    $('#auth-label').textContent = State.auth ? 'Connected' : 'Offline';
+    if (State.auth && State.view === 'signin') {
+      hideWebview();
+      setView('home');
+      loadHome();
+      toast('Apple Music connected');
+    } else if (!State.auth) {
+      setView('signin');
+    }
+  }
+  State.playing = s.state === 2;
+  $('#pb-play').innerHTML = State.playing ? '&#x23F8;' : '&#x25B6;';
+  window.auralis.audioPaused(!State.playing);
+  State.dur = s.dur || (s.item ? s.item.ms / 1000 : 0);
+  if (!State.seeking) {
+    State.time = s.time || 0;
+    $('#pb-time').textContent = fmtTime(State.time);
+    $('#pb-seek').value = State.dur ? Math.round((State.time / State.dur) * 1000) : 0;
+    Lyrics.sync(State.time);
+  }
+  // new track?
+  const it = s.item;
+  if (it && (State.lastItemId !== it.id)) {
+    State.lastItemId = it.id;
+    State.item = it;
+    State.lyricKey = '';
+    Lyrics.reset();
+    refreshNowPlaying();
+    highlightPlayingRow(it.cid || it.id);
+  } else if (it) {
+    State.item = it;
+  }
+  if (!s.item && State.item) {
+    State.item = null; State.lastItemId = null; State.lyricKey = '';
+    Lyrics.reset();
+    $('#pb-title').textContent = 'Nothing playing';
+    $('#pb-artist').textContent = '';
+  }
+  // volume reflect once
+  if (Math.abs(($('#pb-vol').value / 100) - s.vol) > 0.02 && !volumeDragging) {
+    $('#pb-vol').value = Math.round(s.vol * 100);
+  }
+}
+
+function highlightPlayingRow(id) {
+  $$('.row-song').forEach((r) => r.classList.toggle('playing', r.dataset.id === id));
+}
+
+/* ------------------------------------------------------------------ webview */
+function showWebview() {
+  $('#apple').classList.remove('hidden');
+  $('#view-signin').classList.remove('hidden');
+  $('#signin-hint').classList.remove('hidden');
+  State.webviewShown = true;
+}
+function hideWebview() {
+  $('#apple').classList.add('hidden');
+  State.webviewShown = false;
+}
+
+/* ------------------------------------------------------------------ settings */
+function applySettings() {
+  window.__vizMode = Settings.viz === 'nebula' ? 'nebula' : 'spectrum';
+  if (Settings.viz === 'off') window.__vizMode = 'off';
+  $('#set-viz').value = Settings.viz;
+  $('#set-accent').value = Settings.accent;
+  $('#set-lyrsize').value = Settings.lyrSize;
+  document.documentElement.style.setProperty('--lyr-size', Settings.lyrSize + 'px');
+  if (Settings.accent === 'indigo') fixedPalette();
+}
+
+function vizAutoCycle() {
+  // in auto mode, alternate every 45 s
+  if (Settings.viz !== 'auto') { window.__vizMode = Settings.viz === 'off' ? 'off' : Settings.viz; return; }
+  const idx = Math.floor(Date.now() / 45000) % 2;
+  window.__vizMode = idx === 0 ? 'spectrum' : 'nebula';
+}
+
+/* -------------------------------------------------------------------- init */
+async function init() {
+  Apple.init();
+  applySettings();
+  fixedPalette();
+
+  // visualizer canvases
+  Viz.registry.push(new Viz($('#viz-main')));
+  Viz.registry.push(new Viz($('#viz-mini'), { mini: true }));
+  Viz.registry.find((v) => v.cv.id === 'viz-mini').visible = true;
+  setInterval(vizAutoCycle, 5000);
+  vizAutoCycle();
+
+  // window controls
+  $('#w-min').addEventListener('click', () => window.auralis.win('minimize'));
+  $('#w-max').addEventListener('click', () => window.auralis.win('maximize'));
+  $('#w-close').addEventListener('click', () => window.auralis.win('close'));
+
+  // nav
+  $$('.nav-item').forEach((b) => b.addEventListener('click', () => {
+    if (!State.auth && b.dataset.view !== 'settings') { toast('Sign in to Apple Music first'); return; }
+    setView(b.dataset.view);
+    if (b.dataset.view === 'home' && !$('#home-rows').children.length) loadHome();
+    if (b.dataset.view === 'library' && !$('#library-content').children.length) loadLibrary();
+    if (b.dataset.view === 'now' && !State.item) toast('Play something first');
+  }));
+  $$('.lib-tab').forEach((t) => t.addEventListener('click', () => {
+    $$('.lib-tab').forEach((x) => x.classList.remove('active'));
+    t.classList.add('active');
+    libTab = t.dataset.lib;
+    $('#library-content').style.flexDirection = '';
+    loadLibrary();
+  }));
+
+  // sign in
+  $('#btn-signin').addEventListener('click', () => {
+    showWebview();
+  });
+
+  // transport
+  $('#pb-play').addEventListener('click', () => Apple.toggle());
+  $('#pb-next').addEventListener('click', () => Apple.next());
+  $('#pb-prev').addEventListener('click', () => Apple.prev());
+  $('#pb-seek').addEventListener('input', () => { State.seeking = true; $('#pb-time').textContent = fmtTime(($('#pb-seek').value / 1000) * State.dur); });
+  $('#pb-seek').addEventListener('change', () => { Apple.seek(($('#pb-seek').value / 1000) * State.dur); State.seeking = false; });
+
+  $('#pb-vol').addEventListener('input', () => Apple.setVol($('#pb-vol').value / 100));
+  $('#pb-lyrics').addEventListener('click', () => setView('now'));
+  $('#pb-viz').addEventListener('click', cycleViz);
+  $('#pb-viz').classList.add('on');
+
+  // settings
+  $('#set-viz').addEventListener('change', (e) => { Settings.viz = e.target.value; Settings.save(); applySettings(); });
+  $('#set-accent').addEventListener('change', (e) => { Settings.accent = e.target.value; Settings.save(); applySettings(); if (Settings.accent === 'artwork' && State.item) refreshNowPlaying(); });
+  $('#set-lyrsize').addEventListener('input', (e) => { Settings.lyrSize = +e.target.value; document.documentElement.style.setProperty('--lyr-size', Settings.lyrSize + 'px'); Settings.save(); });
+
+  // audio source picker
+  window.auralis.audioSources().then((srcs) => {
+    const sel = $('#set-source');
+    for (const s of srcs) {
+      const o = el('option', null, s.desc);
+      o.value = s.name;
+      sel.appendChild(o);
+    }
+    sel.value = Settings.source || '';
+  });
+  $('#set-source').addEventListener('change', (e) => {
+    Settings.source = e.target.value;
+    Settings.save();
+    window.auralis.audioSetSource(Settings.source || null);
+  });
+  $('#btn-show-player').addEventListener('click', () => showWebview());
+
+  // audio capture
+  window.auralis.audioStart();
+
+  // search
+  wireSearch();
+
+  // keyboard
+  window.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') {
+      if (e.key === 'Escape') e.target.blur();
+      return;
+    }
+    if (e.code === 'Space') { e.preventDefault(); Apple.toggle(); }
+    else if (e.key === 'ArrowRight') Apple.seek(State.time + 10);
+    else if (e.key === 'ArrowLeft') Apple.seek(Math.max(0, State.time - 10));
+    else if (e.key === 'v' || e.key === 'V') cycleViz();
+    else if (e.key === 'l' || e.key === 'L') setView('now');
+    else if (e.key === 'Escape' && State.webviewShown) hideWebview();
+  });
+
+  setView('signin');
+
+  // wait for MusicKit, then start polling
+  const ok = await Apple.waitReady();
+  if (!ok) {
+    $('#signin-hint').textContent = 'Could not reach the Apple Music player. Check your internet connection and restart Auralis.';
+    $('#signin-hint').classList.remove('hidden');
+    return;
+  }
+  setInterval(async () => {
+    try { handleState(JSON.parse(await Apple.exec(STATE_JS))); } catch {}
+  }, 500);
+  showWebview(); // let the user sign in (hidden again once authorized)
+}
+
+function cycleViz() {
+  const order = ['auto', 'spectrum', 'nebula', 'off'];
+  Settings.viz = order[(order.indexOf(Settings.viz) + 1) % order.length];
+  Settings.save();
+  $('#set-viz').value = Settings.viz;
+  applySettings();
+  toast('Visualizer: ' + Settings.viz);
+}
+
+window.addEventListener('DOMContentLoaded', init);

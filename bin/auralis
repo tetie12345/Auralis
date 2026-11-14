@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Auralis launcher — runs the Widevine-enabled Electron binary (required for
+# Apple Music DRM playback). Add `--x11` to force XWayland if needed.
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ELECTRON="$DIR/vendor/electron/electron"
+
+if [ ! -x "$ELECTRON" ]; then
+  echo "Electron binary missing at $ELECTRON" >&2
+  echo "Run: scripts/install-electron.sh" >&2
+  exit 1
+fi
+
+export ELECTRON_DISABLE_SANDBOX="${ELECTRON_DISABLE_SANDBOX:-1}"
+exec "$ELECTRON" "$DIR" \
+  --ozone-platform-hint=auto \
+  "$@"

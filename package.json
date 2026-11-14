@@ -1,0 +1,12 @@
+{
+  "name": "auralis",
+  "productName": "Auralis",
+  "version": "0.1.0",
+  "description": "Auralis — a futuristic Apple Music client for Linux with a live visualizer, time-synced lyrics and artwork-driven theming.",
+  "main": "src/main/index.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "author": "Floris Tabak",
+  "license": "MIT"
+}

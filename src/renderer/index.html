@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Auralis</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <header id="titlebar">
+    <div class="brand">
+      <span class="brand-mark"></span><span class="brand-name">AURALIS</span>
+    </div>
+    <div class="titlebar-drag"></div>
+    <div class="win-controls">
+      <button id="w-min" title="Minimize">&#x2500;</button>
+      <button id="w-max" title="Maximize">&#x25A1;</button>
+      <button id="w-close" title="Close">&#x2715;</button>
+    </div>
+  </header>
+
+  <div id="shell">
+    <nav id="sidebar">
+      <button class="nav-item active" data-view="home">
+        <span class="nav-ico">&#x2302;</span><span>Home</span>
+      </button>
+      <button class="nav-item" data-view="search">
+        <span class="nav-ico">&#x2315;</span><span>Search</span>
+      </button>
+      <button class="nav-item" data-view="library">
+        <span class="nav-ico">&#x2261;</span><span>Library</span>
+      </button>
+      <button class="nav-item" data-view="now">
+        <span class="nav-ico">&#x25CE;</span><span>Now Playing</span>
+      </button>
+      <div class="sidebar-gap"></div>
+      <button class="nav-item" data-view="settings">
+        <span class="nav-ico">&#x2699;</span><span>Settings</span>
+      </button>
+      <div id="auth-chip" class="auth-chip off"><span class="dot"></span><span id="auth-label">Offline</span></div>
+    </nav>
+
+    <main id="views">
+
+      <!-- Sign-in -->
+      <section id="view-signin" class="view">
+        <div class="signin-card">
+          <div class="signin-logo"></div>
+          <h1>Auralis</h1>
+          <p class="muted">Your Apple Music, with a visualizer that actually
+          deserves the music.</p>
+          <button id="btn-signin" class="btn-primary">Connect Apple Music</button>
+          <p id="signin-hint" class="muted small hidden">Sign in inside the player
+          below (top-right account button). Approve the 2FA prompt on your phone &mdash;
+          Auralis will detect it and take over from there.</p>
+        </div>
+        <webview id="apple" src="https://music.apple.com/" partition="persist:apple"
+                 allowpopups webpreferences="contextIsolation=no,nodeIntegration=no,sandbox=no,backgroundThrottling=no"
+                 class="hidden"></webview>
+      </section>
+
+      <!-- Home -->
+      <section id="view-home" class="view hidden">
+        <h2 class="view-title">Listen Now</h2>
+        <div id="home-rows"></div>
+      </section>
+
+      <!-- Search -->
+      <section id="view-search" class="view hidden">
+        <div class="search-bar">
+          <input id="search-input" type="text" placeholder="Search artists, songs, playlists&hellip;" autocomplete="off">
+        </div>
+        <div id="search-results"></div>
+      </section>
+
+      <!-- Library -->
+      <section id="view-library" class="view hidden">
+        <div class="lib-tabs">
+          <button class="lib-tab active" data-lib="playlists">Playlists</button>
+          <button class="lib-tab" data-lib="songs">Songs</button>
+        </div>
+        <div id="library-content"></div>
+      </section>
+
+      <!-- Now Playing -->
+      <section id="view-now" class="view hidden">
+        <div id="now-wrap">
+          <div id="now-left">
+            <img id="now-art" alt="">
+            <div id="now-meta">
+              <div id="now-title">&mdash;</div>
+              <div id="now-artist">&mdash;</div>
+            </div>
+          </div>
+          <div id="now-right">
+            <div id="lyrics-scroll"><p class="lyrics-empty">Lyrics appear when a song plays.</p></div>
+          </div>
+        </div>
+        <div id="viz-strip"><canvas id="viz-main"></canvas></div>
+      </section>
+
+      <!-- Settings -->
+      <section id="view-settings" class="view hidden">
+        <h2 class="view-title">Settings</h2>
+        <div class="settings-grid">
+          <div class="setting-row">
+            <label>Visualizer</label>
+            <select id="set-viz">
+              <option value="auto">Auto (alternate)</option>
+              <option value="spectrum">Spectrum</option>
+              <option value="nebula">Nebula</option>
+              <option value="off">Off</option>
+            </select>
+          </div>
+          <div class="setting-row">
+            <label>Audio source (visualizer)</label>
+            <select id="set-source"><option value="">Default sink monitor</option></select>
+          </div>
+          <div class="setting-row">
+            <label>Lyrics text size</label>
+            <input id="set-lyrsize" type="range" min="14" max="30" step="1" value="19">
+          </div>
+          <div class="setting-row">
+            <label>Theme accent</label>
+            <select id="set-accent">
+              <option value="artwork">Follow album artwork</option>
+              <option value="indigo">Fixed indigo</option>
+            </select>
+          </div>
+          <div class="setting-row">
+            <button id="btn-show-player" class="btn-ghost">Show embedded Apple player</button>
+          </div>
+          <p class="muted small">Keyboard: <b>Space</b> play/pause &middot; <b>&larr;/&rarr;</b> seek 10s &middot; <b>V</b> visualizer mode &middot; <b>L</b> lyrics</p>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Player bar -->
+  <footer id="playerbar">
+    <div class="pb-left">
+      <img id="pb-art" alt="">
+      <div class="pb-info">
+        <div id="pb-title">Nothing playing</div>
+        <div id="pb-artist">&nbsp;</div>
+      </div>
+      <canvas id="viz-mini"></canvas>
+    </div>
+    <div class="pb-center">
+      <div class="pb-controls">
+        <button id="pb-prev" title="Previous">&#x23EE;</button>
+        <button id="pb-play" title="Play/Pause">&#x25B6;</button>
+        <button id="pb-next" title="Next">&#x23ED;</button>
+      </div>
+      <div class="pb-progress">
+        <span id="pb-time">0:00</span>
+        <input id="pb-seek" type="range" min="0" max="1000" value="0">
+        <span id="pb-dur">0:00</span>
+      </div>
+    </div>
+    <div class="pb-right">
+      <button id="pb-lyrics" title="Lyrics (L)">&#x266A;</button>
+      <button id="pb-viz" title="Visualizer (V)">&#x2588;</button>
+      <svg id="pb-vol-ico" width="16" height="16" viewBox="0 0 16 16"><path d="M2 6h3l4-3v10l-4-3H2z" fill="currentColor"/><path d="M11 5c1.2 1.6 1.2 4.4 0 6" stroke="currentColor" fill="none" stroke-width="1.4" stroke-linecap="round"/></svg>
+      <input id="pb-vol" type="range" min="0" max="100" value="80">
+    </div>
+  </footer>
+
+  <div id="toast"></div>
+
+  <script src="visualizer.js"></script>
+  <script src="palette.js"></script>
+  <script src="lyrics.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
