@@ -128,7 +128,10 @@ const Lyrics = (() => {
     const n = nodes[idx];
     if (n) {
       const box = document.getElementById('lyrics-scroll');
-      const target = n.offsetTop - box.clientHeight * 0.42;
+      // rect-based targeting: offsetTop is unreliable inside nested scroll boxes
+      const boxTop = box.getBoundingClientRect().top;
+      const lineTop = n.getBoundingClientRect().top;
+      const target = box.scrollTop + (lineTop - boxTop) - box.clientHeight * 0.42;
       box.scrollTo({ top: Math.max(0, target), behavior: 'smooth' });
     }
   }

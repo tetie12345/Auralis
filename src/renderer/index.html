@@ -93,7 +93,12 @@
             </div>
           </div>
           <div id="now-right">
+            <div class="now-tabs">
+              <button id="tab-lyrics" class="now-tab active">Lyrics</button>
+              <button id="tab-queue" class="now-tab">Up Next</button>
+            </div>
             <div id="lyrics-scroll"><p class="lyrics-empty">Lyrics appear when a song plays.</p></div>
+            <div id="queue-scroll" class="hidden"></div>
           </div>
         </div>
         <div id="viz-strip"><canvas id="viz-main"></canvas></div>
@@ -160,7 +165,9 @@
     </div>
     <div class="pb-right">
       <button id="pb-lyrics" title="Lyrics (L)">&#x266A;</button>
+      <button id="pb-queue" title="Up next">&#x2261;</button>
       <button id="pb-viz" title="Visualizer (V)">&#x2588;</button>
+      <button id="pb-full" title="Fullscreen (F)">&#x26F6;</button>
       <svg id="pb-vol-ico" width="16" height="16" viewBox="0 0 16 16"><path d="M2 6h3l4-3v10l-4-3H2z" fill="currentColor"/><path d="M11 5c1.2 1.6 1.2 4.4 0 6" stroke="currentColor" fill="none" stroke-width="1.4" stroke-linecap="round"/></svg>
       <input id="pb-vol" type="range" min="0" max="100" value="80">
     </div>

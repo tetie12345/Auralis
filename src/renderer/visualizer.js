@@ -39,7 +39,7 @@ const Analyser = (() => {
 
   const raw = new Float32Array(BANDS);
   const bands = new Float32Array(BANDS);
-  let peak = 0.35;
+  let peaks = null;
   const feats = { bass: 0, mid: 0, treble: 0, level: 0 };
 
   function fft() {
@@ -66,26 +66,30 @@ const Analyser = (() => {
     fft();
     let sum = 0;
     for (let b = 0; b < BANDS; b++) {
-      let m = 0;
+      // RMS energy over the band's bins (smoother than max-pooling, which made
+      // neighbouring low bands jump in lockstep)
       const lo = edges[b], hi = Math.max(lo + 1, edges[b + 1]);
-      for (let k = lo; k < hi; k++) {
-        const mag = Math.sqrt(re[k] * re[k] + im[k] * im[k]) / N;
-        if (mag > m) m = mag;
-      }
-      // slight tilt boost so highs are visible
-      raw[b] = m * (1 + (b / BANDS) * 1.7);
+      let acc = 0;
+      for (let k = lo; k < hi; k++) acc += re[k] * re[k] + im[k] * im[k];
+      let m = Math.sqrt(acc / (hi - lo)) / N;
+      m = Math.pow(m, 0.72); // decompress dynamic range
+      // gentle treble lift so highs stay visible
+      m *= 0.85 + 1.1 * Math.pow(b / BANDS, 1.15);
+      raw[b] = m;
       sum += raw[b];
     }
-    // adaptive normalization (peak follower)
-    let mx = 0;
-    for (let b = 0; b < BANDS; b++) if (raw[b] > mx) mx = raw[b];
-    peak = Math.max(0.18, peak * 0.996 + mx * 0.004);
-    const norm = 1 / peak;
+    // per-band adaptive normalization: each band scales to its own recent peak
+    // (cava-style), so quiet bass isn't squashed by loud mids
+    if (!peaks) { peaks = new Float32Array(BANDS).fill(0.05); }
     for (let b = 0; b < BANDS; b++) {
-      let v = Math.min(1, raw[b] * norm);
-      v = Math.pow(v, 0.8); // perceived curve
-      // smoothing: fast attack, slow decay
-      bands[b] = v > bands[b] ? v : bands[b] * 0.86 + v * 0.14;
+      peaks[b] = Math.max(peaks[b] * 0.992, raw[b], 0.02);
+    }
+    for (let b = 0; b < BANDS; b++) {
+      const v = Math.min(1, raw[b] / peaks[b]);
+      // frequency-dependent smoothing: lows glide, highs snap
+      const t = b / BANDS;
+      const decay = 0.90 - 0.10 * t;
+      bands[b] = v > bands[b] ? v : bands[b] * decay + v * (1 - decay);
     }
     feats.bass = avg(bands, 0, 12);
     feats.mid = avg(bands, 12, 44);
@@ -164,32 +168,70 @@ const mixc = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a
 Viz.prototype.drawSpectrum = function (ctx, W, H, c, dpr, mini) {
   const bands = Analyser.bands;
   const B = Analyser.BANDS;
-  const baseY = mini ? H * 0.94 : H * 0.86;
-  const maxH = mini ? H * 0.88 : H * 0.80;
 
-  // trail fade (erase previous frame instead of painting over, so the
-  // underlying view gradient stays visible)
+  if (mini) {
+    // simple smoothed bars, integer-spaced band mapping
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.fillStyle = 'rgba(0,0,0,0.30)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalCompositeOperation = 'source-over';
+    const n = 18;
+    const baseY = H * 0.94, maxH = H * 0.88;
+    const gap = 1.5 * dpr;
+    const bw = (W - gap * (n - 1)) / n;
+    for (let i = 0; i < n; i++) {
+      const b0 = Math.floor(i * B / n), b1 = Math.max(b0 + 1, Math.floor((i + 1) * B / n));
+      let v = 0;
+      for (let k = b0; k < b1; k++) if (bands[k] > v) v = bands[k];
+      const h = Math.max(2 * dpr, Math.min(1, v * 1.15) * maxH);
+      const x = i * (bw + gap);
+      ctx.fillStyle = rgba(mixc(c.accent, c.accent2, i / n), 0.9);
+      ctx.fillRect(x, baseY - h, bw, h);
+    }
+    return;
+  }
+
+  // ---- cava-style gravity bars (main canvas) ----
+  if (!this._g) {
+    this._g = { h: new Float32Array(64), v: new Float32Array(64), cap: new Float32Array(64), capV: new Float32Array(64) };
+  }
+  const g = this._g;
+  const n = g.h.length;
+
+  // erase previous frame, keeping the view gradient visible
   ctx.globalCompositeOperation = 'destination-out';
-  ctx.fillStyle = 'rgba(0,0,0,0.30)';
+  ctx.fillStyle = 'rgba(0,0,0,0.26)';
   ctx.fillRect(0, 0, W, H);
   ctx.globalCompositeOperation = 'source-over';
 
-  const n = mini ? 14 : B;
-  const gap = mini ? 1.5 * dpr : 2 * dpr;
+  const baseY = H * 0.88;
+  const maxH = H * 0.82;
+  const gap = 2.5 * dpr;
   const bw = (W - gap * (n - 1)) / n;
-  const groups = B / n;
+  const gravity = 0.00035;    // normalized units/frame² (~1.3 s full fall)
+  const capGravity = 0.00016;
 
   for (let i = 0; i < n; i++) {
+    // even coverage of the 96 bands across n bars
+    const b0 = Math.floor(i * B / n), b1 = Math.max(b0 + 1, Math.floor((i + 1) * B / n));
     let v = 0;
-    for (let k = 0; k < groups; k++) { const x = bands[i * groups + k]; if (x > v) v = x; }
-    if (mini) v = Math.min(1, v * 1.15);
-    const h = Math.max(2 * dpr, v * maxH);
+    for (let k = b0; k < b1; k++) if (bands[k] > v) v = bands[k];
+
+    // rise instantly, fall under gravity with velocity accumulation
+    if (v >= g.h[i]) { g.h[i] = v; g.v[i] = 0; }
+    else { g.v[i] += gravity; g.h[i] -= g.v[i]; if (g.h[i] < 0) { g.h[i] = 0; g.v[i] = 0; } }
+
+    // peak cap: holds, then falls slower
+    if (g.h[i] > g.cap[i]) { g.cap[i] = g.h[i]; g.capV[i] = 0; }
+    else { g.capV[i] += capGravity; g.cap[i] -= g.capV[i]; if (g.cap[i] < g.h[i]) { g.cap[i] = g.h[i]; g.capV[i] = 0; } }
+
     const x = i * (bw + gap);
+    const h = Math.max(2 * dpr, g.h[i] * maxH);
     const col = mixc(c.accent, c.accent2, i / n);
-    const g = ctx.createLinearGradient(0, baseY - h, 0, baseY);
-    g.addColorStop(0, rgba(mixc(col, [255, 255, 255], 0.25), 0.95));
-    g.addColorStop(1, rgba(col, 0.85));
-    ctx.fillStyle = g;
+    const grad = ctx.createLinearGradient(0, baseY - h, 0, baseY);
+    grad.addColorStop(0, rgba(mixc(col, [255, 255, 255], 0.35), 0.98));
+    grad.addColorStop(1, rgba(col, 0.9));
+    ctx.fillStyle = grad;
     const r = Math.min(bw / 2, 3 * dpr);
     ctx.beginPath();
     ctx.moveTo(x, baseY);
@@ -200,17 +242,22 @@ Viz.prototype.drawSpectrum = function (ctx, W, H, c, dpr, mini) {
     ctx.lineTo(x + bw, baseY);
     ctx.closePath();
     ctx.fill();
-    if (!mini) { // reflection
-      ctx.globalAlpha = 0.16;
-      ctx.fillStyle = rgba(col, 0.9);
-      ctx.fillRect(x, baseY + 2 * dpr, bw, h * 0.22);
-      ctx.globalAlpha = 1;
-    }
+
+    // reflection
+    ctx.globalAlpha = 0.15;
+    ctx.fillStyle = rgba(col, 0.9);
+    ctx.fillRect(x, baseY + 2 * dpr, bw, h * 0.20);
+    ctx.globalAlpha = 1;
+
+    // peak cap marker
+    const cy = baseY - Math.max(h, g.cap[i] * maxH) - 3 * dpr;
+    ctx.fillStyle = rgba(mixc(col, [255, 255, 255], 0.6), 0.9);
+    ctx.fillRect(x, cy, bw, 1.6 * dpr);
   }
-  if (!mini) { // baseline
-    ctx.fillStyle = rgba(c.accent, 0.35);
-    ctx.fillRect(0, baseY, W, 1 * dpr);
-  }
+
+  // baseline
+  ctx.fillStyle = rgba(c.accent, 0.35);
+  ctx.fillRect(0, baseY, W, 1 * dpr);
 };
 
 Viz.prototype.drawNebula = function (ctx, W, H, c, dpr, time) {

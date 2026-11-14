@@ -83,6 +83,7 @@ const Palette = (() => {
         accent: hex(v1),
         accent2: hex(v2),
         tint: `rgba(${v1.map((x) => Math.round(x * 0.8)).join(',')},0.15)`,
+        glow: `rgba(${v1.map((x) => Math.round(x)).join(',')},0.50)`,
         viz: {
           accent: floorSat(darken(v1, 0.95), 0.38),
           accent2: floorSat(darken(v2, 0.95), 0.38),

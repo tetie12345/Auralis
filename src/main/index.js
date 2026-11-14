@@ -97,13 +97,14 @@ app.on('window-all-closed', () => {
 });
 
 // ---------------------------------------------------------------- IPC: window
-ipcMain.handle('win', (_e, action) => {
+ipcMain.handle('win', (_e, action, arg) => {
   if (!win) return false;
   switch (action) {
     case 'minimize': win.minimize(); return true;
     case 'maximize': win.isMaximized() ? win.unmaximize() : win.maximize(); return win.isMaximized();
     case 'close': win.close(); return true;
     case 'is-maximized': return win.isMaximized();
+    case 'fullscreen': win.setFullScreen(arg === true); return true;
     default: return false;
   }
 });

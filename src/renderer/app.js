@@ -208,7 +208,10 @@ function applyPalette(dataUrl) {
     r.setProperty('--accent', pal.accent);
     r.setProperty('--accent2', pal.accent2);
     r.setProperty('--tint', pal.tint);
+    r.setProperty('--glow', pal.glow || 'rgba(109,125,255,0.45)');
     window.__vizPalette = pal.viz;
+    paintRange($('#pb-seek'));
+    paintRange($('#pb-vol'));
   });
 }
 
@@ -217,7 +220,24 @@ function fixedPalette() {
   r.setProperty('--accent', '#6d7dff');
   r.setProperty('--accent2', '#9b8cff');
   r.setProperty('--tint', 'rgba(109,125,255,0.10)');
+  r.setProperty('--glow', 'rgba(109,125,255,0.45)');
   window.__vizPalette = { accent: [110, 125, 255], accent2: [155, 140, 255], bg: [10, 12, 18] };
+}
+
+/* paint the filled portion of range inputs with the accent color */
+function paintRange(input) {
+  const p = ((input.value - input.min) / (input.max - input.min)) * 100;
+  input.style.background = `linear-gradient(to right, var(--accent) ${p}%, rgba(255,255,255,0.14) ${p}%)`;
+}
+
+/* play and surface queue errors as a toast */
+async function playWithToast(ids, idx, label) {
+  const r = await Apple.play(ids, idx);
+  if (r && String(r).startsWith('ERR')) {
+    toast('Playback error: ' + String(r).slice(4).slice(0, 80));
+    return false;
+  }
+  return true;
 }
 
 /* -------------------------------------------------------------------- cards */
@@ -299,13 +319,12 @@ async function openItem(item) {
   const kind = kindOf(item);
   if (kind === 'song') {
     toast('Playing “' + item.attributes.name + '”');
-    Apple.play([item.attributes.playParams?.catalogId || item.id]);
+    playWithToast([item.attributes.playParams?.catalogId || item.id]);
   } else {
     toast('Loading ' + (item.attributes.name || '') + '…');
     const ids = await trackIds(item);
     if (ids && ids.length) {
-      Apple.play(ids);
-      toast('Queued ' + ids.length + ' tracks');
+      if (await playWithToast(ids)) toast('Queued ' + ids.length + ' tracks');
     } else toast('Could not load this ' + kind);
   }
 }
@@ -387,7 +406,7 @@ async function doSearch(term) {
         main.appendChild(el('div', 'row-sub', s.attributes.artistName || ''));
         row.appendChild(main);
         row.appendChild(el('span', 'row-dur', fmtTime((s.attributes.durationInMillis || 0) / 1000)));
-        row.addEventListener('click', () => Apple.play(songIds, i));
+        row.addEventListener('click', () => playWithToast(songIds, i));
         sec.appendChild(row);
       });
       box.appendChild(sec);
@@ -428,7 +447,7 @@ async function loadLibrary() {
         main.appendChild(el('div', 'row-sub', s.attributes.artistName || ''));
         row.appendChild(main);
         row.appendChild(el('span', 'row-dur', fmtTime((s.attributes.durationInMillis || 0) / 1000)));
-        row.addEventListener('click', () => Apple.play(ids, i));
+        row.addEventListener('click', () => playWithToast(ids, i));
         box.appendChild(row);
       });
       box.style.flexDirection = 'column';
@@ -529,6 +548,86 @@ function vizAutoCycle() {
   window.__vizMode = idx === 0 ? 'spectrum' : 'nebula';
 }
 
+/* --------------------------------------------------------------- queue view */
+const QUEUE_JS = `(() => {
+  try {
+    const q = MusicKit.getInstance().queue;
+    const items = (q._queueItems || []).map((e) => {
+      const it = e && e.item;
+      const a = it && it.attributes;
+      return it ? {
+        id: it.id || '',
+        title: (a && a.name) || '', artist: (a && a.artistName) || '',
+        ms: (a && a.durationInMillis) || 0,
+        art: (a && a.artwork && a.artwork.url) || ''
+      } : null;
+    });
+    return JSON.stringify({ pos: q._position, items });
+  } catch (e) { return JSON.stringify({ pos: -1, items: [] }); }
+})()`;
+
+let queueShown = false;
+
+function showNowTab(which) {
+  const lyrics = which === 'lyrics';
+  $('#tab-lyrics').classList.toggle('active', lyrics);
+  $('#tab-queue').classList.toggle('active', !lyrics);
+  $('#lyrics-scroll').classList.toggle('hidden', !lyrics);
+  $('#queue-scroll').classList.toggle('hidden', lyrics);
+  queueShown = !lyrics;
+  if (queueShown) refreshQueue();
+}
+
+async function refreshQueue() {
+  if (!queueShown || State.view !== 'now') return;
+  try {
+    const q = JSON.parse(await Apple.exec(QUEUE_JS));
+    const box = $('#queue-scroll');
+    if (!q.items || !q.items.length) {
+      if (!box.querySelector('.lyrics-empty')) box.innerHTML = '<p class="lyrics-empty">Queue is empty.</p>';
+      return;
+    }
+    const sig = q.items.map((x) => x && x.id).join(',') + '|' + q.pos;
+    if (State.queueSig === sig) return;
+    State.queueSig = sig;
+    box.innerHTML = '';
+    q.items.forEach((it, i) => {
+      if (!it) return;
+      const row = el('div', 'q-row' + (i === q.pos ? ' current' : ''));
+      const img = el('img', 'q-art');
+      if (it.art) window.auralis.fetchArt(it.art.replace('{w}', '100').replace('{h}', '100')).then((d) => { if (d) img.src = d; });
+      row.appendChild(img);
+      const main = el('div', 'q-main');
+      main.appendChild(el('div', 'q-title', it.title || '(loading)'));
+      main.appendChild(el('div', 'q-artist', it.artist));
+      row.appendChild(main);
+      row.appendChild(el('span', 'q-dur', fmtTime(it.ms / 1000)));
+      row.addEventListener('click', () => {
+        Apple.exec(`MusicKit.getInstance().changeToMediaItem(MusicKit.getInstance().queue._queueItems[${i}].item).then(()=>"ok").catch(e=>"ERR "+e)`);
+        toast('Jumping to “' + it.title + '”');
+      });
+      box.appendChild(row);
+    });
+    const cur = box.querySelector('.q-row.current');
+    if (cur) cur.scrollIntoView({ block: 'nearest' });
+  } catch {}
+}
+
+/* --------------------------------------------------------------- fullscreen */
+function toggleFullscreen() {
+  const on = !document.body.classList.contains('fullscreen');
+  document.body.classList.toggle('fullscreen', on);
+  $('#pb-full').classList.toggle('on', on);
+  window.auralis.win('fullscreen', on);
+  if (on) {
+    State.prevView = State.view;
+    setView('now');
+    toast('Fullscreen — press Esc or F to exit');
+  } else {
+    setView(State.prevView || 'now');
+  }
+}
+
 /* -------------------------------------------------------------------- init */
 async function init() {
   Apple.init();
@@ -541,6 +640,7 @@ async function init() {
   Viz.registry.find((v) => v.cv.id === 'viz-mini').visible = true;
   setInterval(vizAutoCycle, 5000);
   vizAutoCycle();
+  setInterval(refreshQueue, 2000);
 
   // window controls
   $('#w-min').addEventListener('click', () => window.auralis.win('minimize'));
@@ -569,15 +669,25 @@ async function init() {
   });
 
   // transport
-  $('#pb-play').addEventListener('click', () => Apple.toggle());
+  $('#pb-play').addEventListener('click', () => {
+    if (!State.playing && !State.item) { toast('Nothing to play yet'); return; }
+    // optimistic icon swap; the 500 ms poll corrects it
+    const willPlay = !State.playing;
+    $('#pb-play').innerHTML = willPlay ? '&#x23F8;' : '&#x25B6;';
+    Apple.exec('const mk=MusicKit.getInstance();(mk.playbackState===2?mk.pause():mk.play()).then(()=>"ok").catch(e=>"ERR "+e)');
+  });
   $('#pb-next').addEventListener('click', () => Apple.next());
   $('#pb-prev').addEventListener('click', () => Apple.prev());
-  $('#pb-seek').addEventListener('input', () => { State.seeking = true; $('#pb-time').textContent = fmtTime(($('#pb-seek').value / 1000) * State.dur); });
+  $('#pb-seek').addEventListener('input', () => { State.seeking = true; $('#pb-time').textContent = fmtTime(($('#pb-seek').value / 1000) * State.dur); paintRange($('#pb-seek')); });
   $('#pb-seek').addEventListener('change', () => { Apple.seek(($('#pb-seek').value / 1000) * State.dur); State.seeking = false; });
 
-  $('#pb-vol').addEventListener('input', () => Apple.setVol($('#pb-vol').value / 100));
-  $('#pb-lyrics').addEventListener('click', () => setView('now'));
+  $('#pb-vol').addEventListener('input', () => { Apple.setVol($('#pb-vol').value / 100); paintRange($('#pb-vol')); });
+  $('#pb-lyrics').addEventListener('click', () => { setView('now'); showNowTab('lyrics'); });
+  $('#pb-queue').addEventListener('click', () => { setView('now'); showNowTab('queue'); });
   $('#pb-viz').addEventListener('click', cycleViz);
+  $('#pb-full').addEventListener('click', toggleFullscreen);
+  paintRange($('#pb-seek'));
+  paintRange($('#pb-vol'));
   $('#pb-viz').classList.add('on');
 
   // settings
@@ -618,8 +728,12 @@ async function init() {
     else if (e.key === 'ArrowRight') Apple.seek(State.time + 10);
     else if (e.key === 'ArrowLeft') Apple.seek(Math.max(0, State.time - 10));
     else if (e.key === 'v' || e.key === 'V') cycleViz();
-    else if (e.key === 'l' || e.key === 'L') setView('now');
-    else if (e.key === 'Escape' && State.webviewShown) hideWebview();
+    else if (e.key === 'f' || e.key === 'F') toggleFullscreen();
+    else if (e.key === 'l' || e.key === 'L') { setView('now'); showNowTab('lyrics'); }
+    else if (e.key === 'Escape') {
+      if (document.body.classList.contains('fullscreen')) toggleFullscreen();
+      else if (State.webviewShown) hideWebview();
+    }
   });
 
   setView('signin');
