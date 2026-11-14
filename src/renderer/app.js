@@ -158,12 +158,13 @@ async function refreshNowPlaying() {
   $('#pb-title').textContent = it.title;
   $('#pb-artist').textContent = it.artist;
 
-  // artwork (only reload when the track actually changed)
+  // artwork (only reload when the track actually changed; a failed fetch
+  // leaves artItemId unset so the retry interval picks it up)
   if (it.art && State.artItemId !== it.id) {
-    State.artItemId = it.id;
     const url = it.art.replace('{w}', '600').replace('{h}', '600');
     const dataUrl = await window.auralis.fetchArt(url);
     if (dataUrl) {
+      State.artItemId = it.id;
       $('#now-art').src = dataUrl;
       $('#pb-art').src = dataUrl;
       if (Settings.accent === 'artwork') applyPalette(dataUrl);
@@ -662,6 +663,10 @@ async function init() {
   setInterval(vizAutoCycle, 5000);
   vizAutoCycle();
   setInterval(refreshQueue, 2000);
+  // retry failed artwork/palette loads (e.g. momentary network hiccup)
+  setInterval(() => {
+    if (State.item && State.item.art && State.artItemId !== State.item.id) refreshNowPlaying();
+  }, 3000);
 
   // window controls
   $('#w-min').addEventListener('click', () => window.auralis.win('minimize'));

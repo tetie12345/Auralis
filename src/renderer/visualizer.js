@@ -201,16 +201,17 @@ Viz.prototype.drawSpectrum = function (ctx, W, H, c, dpr, mini) {
     return;
   }
 
-  // ---- cava-style gravity bars (main canvas) ----
+  // ---- snappy bars (main canvas): direct value-follow like the mini, plus a
+  // fast-falling peak cap for the cava flavour ----
   if (!this._g) {
-    this._g = { h: new Float32Array(64), v: new Float32Array(64), cap: new Float32Array(64), capV: new Float32Array(64) };
+    this._g = { cap: new Float32Array(64), capV: new Float32Array(64) };
   }
   const g = this._g;
-  const n = g.h.length;
+  const n = g.cap.length;
 
   // erase previous frame, keeping the view gradient visible
   ctx.globalCompositeOperation = 'destination-out';
-  ctx.fillStyle = 'rgba(0,0,0,0.26)';
+  ctx.fillStyle = 'rgba(0,0,0,0.30)';
   ctx.fillRect(0, 0, W, H);
   ctx.globalCompositeOperation = 'source-over';
 
@@ -218,25 +219,21 @@ Viz.prototype.drawSpectrum = function (ctx, W, H, c, dpr, mini) {
   const maxH = H * 0.82;
   const gap = 2.5 * dpr;
   const bw = (W - gap * (n - 1)) / n;
-  const gravity = 0.0010;      // normalized units/frame² (~0.7 s full fall)
-  const capGravity = 0.00045;
+  const capGravity = 0.0026; // normalized units/frame (~0.4 s cap fall)
 
   for (let i = 0; i < n; i++) {
     // even coverage of the 96 bands across n bars
     const b0 = Math.floor(i * B / n), b1 = Math.max(b0 + 1, Math.floor((i + 1) * B / n));
     let v = 0;
     for (let k = b0; k < b1; k++) if (bands[k] > v) v = bands[k];
+    const hN = Math.min(0.98, v);
 
-    // rise instantly, fall under gravity with velocity accumulation
-    if (v >= g.h[i]) { g.h[i] = v; g.v[i] = 0; }
-    else { g.v[i] += gravity; g.h[i] -= g.v[i]; if (g.h[i] < 0) { g.h[i] = 0; g.v[i] = 0; } }
-
-    // peak cap: holds, then falls slower
-    if (g.h[i] > g.cap[i]) { g.cap[i] = g.h[i]; g.capV[i] = 0; }
-    else { g.capV[i] += capGravity; g.cap[i] -= g.capV[i]; if (g.cap[i] < g.h[i]) { g.cap[i] = g.h[i]; g.capV[i] = 0; } }
+    // peak cap: rises with the bar, falls quickly but slower than the bar
+    if (hN > g.cap[i]) { g.cap[i] = hN; g.capV[i] = 0; }
+    else { g.capV[i] += capGravity; g.cap[i] -= g.capV[i]; if (g.cap[i] < hN) { g.cap[i] = hN; g.capV[i] = 0; } }
 
     const x = i * (bw + gap);
-    const h = Math.max(2 * dpr, g.h[i] * maxH);
+    const h = Math.max(2 * dpr, hN * maxH);
     const col = mixc(c.accent, c.accent2, i / n);
     const grad = ctx.createLinearGradient(0, baseY - h, 0, baseY);
     grad.addColorStop(0, rgba(mixc(col, [255, 255, 255], 0.35), 0.98));
