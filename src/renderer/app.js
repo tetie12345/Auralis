@@ -412,6 +412,14 @@ function addShelf(container, title, items, opts) {
 }
 
 /* -------------------------------------------------------------------- home */
+// Recommendation titles arrive as {stringForDisplay: "..."} (or a plain string).
+function shelfTitle(rec, idx) {
+  const t = rec.attributes && rec.attributes.title;
+  const s = typeof t === 'string' ? t
+    : t && (t.stringForDisplay || t.string || t.name || t.title);
+  return s || (idx === 0 ? 'Made for you' : 'Recommended');
+}
+
 async function loadHome() {
   const box = $('#home-rows');
   box.innerHTML = '<p class="muted">Loading recommendations…</p>';
@@ -424,8 +432,7 @@ async function loadHome() {
       const rel = rec.relationships && rec.relationships.contents;
       const items = ((rel && rel.data) || []).filter((i) => kindOf(i) !== 'station');
       if (!items.length) continue;
-      const title = (rec.attributes && rec.attributes.title) || (n === 0 ? 'Made for you' : 'Recommended');
-      addShelf(box, title, items);
+      addShelf(box, shelfTitle(rec, n), items);
       n++;
     }
     if (!n) {
