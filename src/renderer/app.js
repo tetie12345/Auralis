@@ -67,6 +67,7 @@ const STATE_JS = `(() => {
       time: (aud && aud.currentTime) || (cp && cp.playbackTime) || 0,
       dur: (cp && cp.duration) || 0,
       vol: mk.volume == null ? 1 : mk.volume,
+      shuffle: mk.shuffleMode === 1,
       sf: mk.storefrontId || (mk.services.mediaAPIAccess && mk.services.mediaAPIAccess.storefrontId) || '',
       item: a ? {
         id: item.id || '',
@@ -126,6 +127,8 @@ const State = {
   lastTime: null,
   lastItemId: null,
   artItemId: null,
+  shuffle: false,
+  queueSig: '',
   seeking: false,
   webviewShown: false,
   lyricKey: '',
@@ -488,7 +491,12 @@ function handleState(s) {
     $('#pb-time').textContent = fmtTime(State.time);
     $('#pb-seek').value = State.dur ? Math.round((State.time / State.dur) * 1000) : 0;
     $('#pb-dur').textContent = fmtTime(State.dur);
+    paintRange($('#pb-seek'));
     Lyrics.sync(State.time);
+  }
+  if (s.shuffle != null && s.shuffle !== State.shuffle) {
+    State.shuffle = s.shuffle;
+    $('#pb-shuffle').classList.toggle('on', s.shuffle);
   }
   // new track?
   const it = s.item;
@@ -591,26 +599,39 @@ async function refreshQueue() {
     if (State.queueSig === sig) return;
     State.queueSig = sig;
     box.innerHTML = '';
+    // pinned current track, then only what's actually coming up
+    if (q.pos >= 0 && q.items[q.pos]) {
+      box.appendChild(queueRow(q.items[q.pos], q.pos, true));
+      const head = el('p', 'lyrics-empty', 'Up next');
+      head.style.cssText = 'padding:14px 0 6px;text-align:left;font-size:12px;letter-spacing:1.5px;text-transform:uppercase;';
+      box.appendChild(head);
+    }
     q.items.forEach((it, i) => {
-      if (!it) return;
-      const row = el('div', 'q-row' + (i === q.pos ? ' current' : ''));
-      const img = el('img', 'q-art');
-      if (it.art) window.auralis.fetchArt(it.art.replace('{w}', '100').replace('{h}', '100')).then((d) => { if (d) img.src = d; });
-      row.appendChild(img);
-      const main = el('div', 'q-main');
-      main.appendChild(el('div', 'q-title', it.title || '(loading)'));
-      main.appendChild(el('div', 'q-artist', it.artist));
-      row.appendChild(main);
-      row.appendChild(el('span', 'q-dur', fmtTime(it.ms / 1000)));
-      row.addEventListener('click', () => {
-        Apple.exec(`MusicKit.getInstance().changeToMediaItem(MusicKit.getInstance().queue._queueItems[${i}].item).then(()=>"ok").catch(e=>"ERR "+e)`);
-        toast('Jumping to “' + it.title + '”');
-      });
-      box.appendChild(row);
+      if (!it || i <= q.pos) return;
+      box.appendChild(queueRow(it, i, false));
     });
-    const cur = box.querySelector('.q-row.current');
-    if (cur) cur.scrollIntoView({ block: 'nearest' });
+    if (q.pos >= q.items.length - 1) {
+      const end = el('p', 'lyrics-empty', 'End of queue');
+      box.appendChild(end);
+    }
   } catch {}
+}
+
+function queueRow(it, i, current) {
+  const row = el('div', 'q-row' + (current ? ' current' : ''));
+  const img = el('img', 'q-art');
+  if (it.art) window.auralis.fetchArt(it.art.replace('{w}', '100').replace('{h}', '100')).then((d) => { if (d) img.src = d; });
+  row.appendChild(img);
+  const main = el('div', 'q-main');
+  main.appendChild(el('div', 'q-title', it.title || '(loading)'));
+  main.appendChild(el('div', 'q-artist', it.artist));
+  row.appendChild(main);
+  row.appendChild(el('span', 'q-dur', fmtTime(it.ms / 1000)));
+  row.addEventListener('click', () => {
+    Apple.exec(`MusicKit.getInstance().changeToMediaItem(MusicKit.getInstance().queue._queueItems[${i}].item).then(()=>"ok").catch(e=>"ERR "+e)`);
+    toast('Jumping to “' + it.title + '”');
+  });
+  return row;
 }
 
 /* --------------------------------------------------------------- fullscreen */
@@ -686,6 +707,15 @@ async function init() {
   $('#pb-queue').addEventListener('click', () => { setView('now'); showNowTab('queue'); });
   $('#pb-viz').addEventListener('click', cycleViz);
   $('#pb-full').addEventListener('click', toggleFullscreen);
+  $('#pb-shuffle').addEventListener('click', () => {
+    const on = !State.shuffle;
+    State.shuffle = on;
+    $('#pb-shuffle').classList.toggle('on', on);
+    Apple.exec(`MusicKit.getInstance().shuffleMode=${on ? 1 : 0}`);
+    toast(on ? 'Shuffle on — applies to newly queued lists' : 'Shuffle off');
+  });
+  $('#tab-lyrics').addEventListener('click', () => showNowTab('lyrics'));
+  $('#tab-queue').addEventListener('click', () => showNowTab('queue'));
   paintRange($('#pb-seek'));
   paintRange($('#pb-vol'));
   $('#pb-viz').classList.add('on');

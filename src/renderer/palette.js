@@ -46,37 +46,19 @@ const Palette = (() => {
       ctx.drawImage(img, 0, 0, s, s);
       const d = ctx.getImageData(0, 0, s, s).data;
 
-      const buckets = new Map();
+      // average colour of the whole cover (alpha-weighted), so every accent
+      // in the UI actually appears on the artwork
+      let r = 0, g = 0, b = 0, n = 0;
       for (let i = 0; i < d.length; i += 4) {
-        const r = d[i], g = d[i + 1], b = d[i + 2], a = d[i + 3];
+        const a = d[i + 3];
         if (a < 200) continue;
-        const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-        if (lum < 22 || lum > 242) continue; // ignore near-black / near-white
-        const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
-        const sat = mx === 0 ? 0 : (mx - mn) / mx;
-        const key = ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4);
-        const e = buckets.get(key) || { n: 0, r: 0, g: 0, b: 0, sat: 0 };
-        e.n++; e.r += r; e.g += g; e.b += b; e.sat += sat;
-        buckets.set(key, e);
+        r += d[i] * a; g += d[i + 1] * a; b += d[i + 2] * a; n += a;
       }
-      const list = [...buckets.values()]
-        .map((e) => ({
-          rgb: [e.r / e.n, e.g / e.n, e.b / e.n],
-          sat: e.sat / e.n,
-          n: e.n,
-          score: e.n * (0.25 + e.sat),
-        }))
-        .sort((a, b) => b.score - a.score);
+      if (!n) return null;
+      const avg = [r / n, g / n, b / n];
 
-      if (!list.length) return null;
-
-      const c1 = saturate(list[0].rgb, 1.25);
-      let c2 = list[1] ? saturate(list[1].rgb, 1.25) : null;
-      // make accent2 sufficiently distinct in hue
-      if (!c2 || dist(c1, c2) < 60) {
-        c2 = rotateHue(c1, 40);
-      }
-
+      const c1 = floorLum(saturate(avg, 1.35), 120);
+      const c2 = rotateHue(c1, 38);
       const v1 = floorLum(saturate(c1, 1.15), 120);
       const v2 = floorLum(c2, 110);
       const out = {

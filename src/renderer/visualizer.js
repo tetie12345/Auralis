@@ -40,6 +40,7 @@ const Analyser = (() => {
   const raw = new Float32Array(BANDS);
   const bands = new Float32Array(BANDS);
   let peaks = null;
+  let globalPeak = 0.2;
   const feats = { bass: 0, mid: 0, treble: 0, level: 0 };
 
   function fft() {
@@ -63,6 +64,8 @@ const Analyser = (() => {
   }
 
   function computeBands() {
+    const T = Object.assign({ comp: 0.72, lowGain: 0.8, highGain: 0.7, gainPow: 0.85, gMix: 0.2, outPow: 1.0 },
+      window.__vizTune || {});
     fft();
     let sum = 0;
     for (let b = 0; b < BANDS; b++) {
@@ -72,23 +75,30 @@ const Analyser = (() => {
       let acc = 0;
       for (let k = lo; k < hi; k++) acc += re[k] * re[k] + im[k] * im[k];
       let m = Math.sqrt(acc / (hi - lo)) / N;
-      m = Math.pow(m, 0.72); // decompress dynamic range
-      // gentle treble lift so highs stay visible
-      m *= 0.85 + 1.1 * Math.pow(b / BANDS, 1.15);
+      m = Math.pow(m, T.comp); // decompress dynamic range
+      // equal-loudness style compensation: raw spectra always lean heavily on
+      // the lows, so attenuate the low shelf and lift the top
+      m *= T.lowGain + T.highGain * Math.pow(b / BANDS, T.gainPow);
       raw[b] = m;
       sum += raw[b];
     }
-    // per-band adaptive normalization: each band scales to its own recent peak
-    // (cava-style), so quiet bass isn't squashed by loud mids
+    // hybrid normalization: mostly a slow-moving global peak (prevents the
+    // constant full-scale clipping), with limited per-band headroom so quiet
+    // bass still gets visible scale
     if (!peaks) { peaks = new Float32Array(BANDS).fill(0.05); }
+    let gmax = 0.02;
     for (let b = 0; b < BANDS; b++) {
       peaks[b] = Math.max(peaks[b] * 0.992, raw[b], 0.02);
+      if (raw[b] > gmax) gmax = raw[b];
     }
+    globalPeak = Math.max(globalPeak * 0.9995, gmax, 0.06);
     for (let b = 0; b < BANDS; b++) {
-      const v = Math.min(1, raw[b] / peaks[b]);
-      // frequency-dependent smoothing: lows glide, highs snap
+      // blend of global and per-band peaks (gMix=1 → global only, 0 → per-band)
+      const denom = Math.pow(globalPeak, T.gMix) * Math.pow(Math.max(peaks[b], 0.02), 1 - T.gMix);
+      const v = Math.min(0.98, Math.pow(raw[b] / denom, T.outPow));
+      // snappier smoothing (lows still glide slightly more than highs)
       const t = b / BANDS;
-      const decay = 0.90 - 0.10 * t;
+      const decay = 0.84 - 0.14 * t;
       bands[b] = v > bands[b] ? v : bands[b] * decay + v * (1 - decay);
     }
     feats.bass = avg(bands, 0, 12);
@@ -208,8 +218,8 @@ Viz.prototype.drawSpectrum = function (ctx, W, H, c, dpr, mini) {
   const maxH = H * 0.82;
   const gap = 2.5 * dpr;
   const bw = (W - gap * (n - 1)) / n;
-  const gravity = 0.00035;    // normalized units/frame² (~1.3 s full fall)
-  const capGravity = 0.00016;
+  const gravity = 0.0010;      // normalized units/frame² (~0.7 s full fall)
+  const capGravity = 0.00045;
 
   for (let i = 0; i < n; i++) {
     // even coverage of the 96 bands across n bars
