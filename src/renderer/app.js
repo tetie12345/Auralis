@@ -47,19 +47,30 @@ Settings.load();
 const STATE_JS = `(() => {
   try {
     const mk = window.MusicKit && MusicKit.getInstance ? MusicKit.getInstance() : null;
-    if (!mk || !mk.player) return JSON.stringify({ ok: false });
-    const p = mk.player();
-    const ci = p.currentMediaItem;
-    const a = ci ? ci.attributes : null;
+    if (!mk) return JSON.stringify({ ok: false });
+    // "playback" build of the web player: no mk.player; live state lives in
+    // services.mediaItemPlayback.currentPlayback and queue internals.
+    const mp = mk.services && mk.services.mediaItemPlayback;
+    const cp = mp && mp.currentPlayback;
+    const q = mk.queue;
+    const pos = q ? q._position : -1;
+    const entry = (q && q._queueItems && pos >= 0) ? q._queueItems[pos] : null;
+    const item = (cp && cp.currentMediaItem) || (entry && (entry.item || entry.mediaItem || entry));
+    const a = item ? (item.attributes || null) : null;
+    // playback time lives on the media element in this build (currentPlayback
+    // only carries {asset, item, userInitiated})
+    const aud = [...document.querySelectorAll('audio,video')].find((e) => !e.muted && e.currentTime > 0)
+      || document.querySelector('audio');
     return JSON.stringify({ ok: true,
       authorized: !!mk.isAuthorized,
-      state: p.playbackState,
-      time: p.playbackTime || 0,
-      dur: p.currentPlaybackDuration || 0,
-      vol: p.volume == null ? 1 : p.volume,
+      state: mk.playbackState,
+      time: (aud && aud.currentTime) || (cp && cp.playbackTime) || 0,
+      dur: (cp && cp.duration) || 0,
+      vol: mk.volume == null ? 1 : mk.volume,
+      sf: mk.storefrontId || (mk.services.mediaAPIAccess && mk.services.mediaAPIAccess.storefrontId) || '',
       item: a ? {
-        id: ci.id || '',
-        cid: (a.playParams && a.playParams.catalogId) || (a.playParams && a.playParams.id) || '',
+        id: item.id || '',
+        cid: (a.playParams && a.playParams.catalogId) || (a.playParams && a.playParams.id) || item.id || '',
         title: a.name || '', artist: a.artistName || '', album: a.albumName || '',
         art: (a.artwork && a.artwork.url) || '',
         ms: a.durationInMillis || 0
@@ -93,14 +104,14 @@ const Apple = {
   },
   play(ids, startIdx = 0) {
     if (!ids || !ids.length) return;
-    const js = startIdx
-      ? `MusicKit.getInstance().setQueue({songs:${JSON.stringify(ids)}}).then(()=>MusicKit.getInstance().player.changeToMediaAtIndex(${startIdx})).then(()=>MusicKit.getInstance().play()).then(()=>"ok").catch(e=>"ERR "+(e&&e.message||e))`
-      : `MusicKit.getInstance().setQueue({songs:${JSON.stringify(ids)}}).then(()=>MusicKit.getInstance().play()).then(()=>"ok").catch(e=>"ERR "+(e&&e.message||e))`;
-    return this.exec(js);
+    const params = startIdx
+      ? `songs:${JSON.stringify(ids)},startWith:${startIdx},startPlaying:true`
+      : `songs:${JSON.stringify(ids)},startPlaying:true`;
+    return this.exec(`MusicKit.getInstance().setQueue({${params}}).then(()=>"ok").catch(e=>"ERR "+(e&&e.message||e))`);
   },
-  toggle() { return this.exec('const mk=MusicKit.getInstance();(mk.playbackState===2?mk.pause():mk.play()).then(()=>"ok").catch(e=>"ERR "+e)'); },
-  next() { return this.exec('MusicKit.getInstance().skipToNext().then(()=>"ok").catch(e=>"ERR "+e)'); },
-  prev() { return this.exec('MusicKit.getInstance().skipToPrevious().then(()=>"ok").catch(e=>"ERR "+e)'); },
+  toggle() { return this.exec('const mk=MusicKit.getInstance();try{(mk.playbackState===2?mk.pause():mk.play()).then(()=>"ok").catch(e=>"ERR "+e)}catch(e){return "ERR "+e}'); },
+  next() { return this.exec('MusicKit.getInstance().skipToNextItem().then(()=>"ok").catch(e=>"ERR "+e)'); },
+  prev() { return this.exec('MusicKit.getInstance().skipToPreviousItem().then(()=>"ok").catch(e=>"ERR "+e)'); },
   seek(t) { return this.exec(`MusicKit.getInstance().seekToTime(${Number(t) || 0})`); },
   setVol(v) { return this.exec(`MusicKit.getInstance().volume=${Number(v)}`); },
 };
@@ -112,7 +123,9 @@ const State = {
   playing: false,
   time: 0,
   dur: 0,
+  lastTime: null,
   lastItemId: null,
+  artItemId: null,
   seeking: false,
   webviewShown: false,
   lyricKey: '',
@@ -142,18 +155,17 @@ async function refreshNowPlaying() {
   $('#pb-title').textContent = it.title;
   $('#pb-artist').textContent = it.artist;
 
-  // artwork
-  if (it.art) {
+  // artwork (only reload when the track actually changed)
+  if (it.art && State.artItemId !== it.id) {
+    State.artItemId = it.id;
     const url = it.art.replace('{w}', '600').replace('{h}', '600');
-    if (State.lastItemId !== it.id) {
-      const dataUrl = await window.auralis.fetchArt(url);
-      if (dataUrl) {
-        $('#now-art').src = dataUrl;
-        $('#pb-art').src = dataUrl;
-        if (Settings.accent === 'artwork') applyPalette(dataUrl);
-      }
+    const dataUrl = await window.auralis.fetchArt(url);
+    if (dataUrl) {
+      $('#now-art').src = dataUrl;
+      $('#pb-art').src = dataUrl;
+      if (Settings.accent === 'artwork') applyPalette(dataUrl);
     }
-  } else {
+  } else if (!it.art) {
     $('#now-art').removeAttribute('src');
   }
 
@@ -431,6 +443,7 @@ function handleState(s) {
   if (!s || !s.ok) return;
   const wasAuth = State.auth;
   State.auth = !!s.authorized;
+  if (s.sf && s.sf !== Apple.sf) Apple.sf = s.sf;
   if (State.auth !== wasAuth) {
     $('#auth-chip').classList.toggle('on', State.auth);
     $('#auth-chip').classList.toggle('off', !State.auth);
@@ -444,7 +457,10 @@ function handleState(s) {
       setView('signin');
     }
   }
-  State.playing = s.state === 2;
+  // "playing" = explicit state OR playback time advancing since last poll
+  const timeAdvanced = State.lastTime != null && s.time > State.lastTime + 0.01 && s.time > 0;
+  State.lastTime = s.time;
+  State.playing = s.state === 2 || timeAdvanced;
   $('#pb-play').innerHTML = State.playing ? '&#x23F8;' : '&#x25B6;';
   window.auralis.audioPaused(!State.playing);
   State.dur = s.dur || (s.item ? s.item.ms / 1000 : 0);
@@ -452,6 +468,7 @@ function handleState(s) {
     State.time = s.time || 0;
     $('#pb-time').textContent = fmtTime(State.time);
     $('#pb-seek').value = State.dur ? Math.round((State.time / State.dur) * 1000) : 0;
+    $('#pb-dur').textContent = fmtTime(State.dur);
     Lyrics.sync(State.time);
   }
   // new track?

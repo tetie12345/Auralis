@@ -79,8 +79,9 @@ app.whenReady().then(() => {
   appleSession.setUserAgent(CHROME_UA, 'en-US');
   appleSession.setPermissionRequestHandler((_wc, _permission, cb) => cb(true));
 
-  audio = new AudioCapture(win);
+  audio = new AudioCapture(null);
   createWindow();
+  audio.win = win; // window must exist before chunks can be forwarded
 
   app.on('second-instance', () => {
     if (win) {
