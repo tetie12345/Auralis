@@ -354,6 +354,7 @@ async function makeCard(item, { round = false } = {}) {
   card.appendChild(el('div', 'card-title', item.attributes.name || ''));
   card.appendChild(el('div', 'card-sub',
     item.attributes.artistName || item.attributes.curatorName || item.type.replace('-', ' ')));
+  if (kindOf(item) === 'song') card.appendChild(songAddButton(item));
   card.addEventListener('click', () => openItem(item));
   return card;
 }
@@ -412,6 +413,18 @@ async function openItem(item) {
       if (await playWithToast(ids)) toast('Queued ' + ids.length + ' tracks');
     } else toast('Could not load this ' + kind);
   }
+}
+
+/* shared "+" add-to-queue button for song cards and song rows */
+function songAddButton(item) {
+  const b = el('button', 'card-add');
+  b.innerHTML = window.icon('plus', 15);
+  b.title = 'Add to queue';
+  b.addEventListener('click', (e) => {
+    e.stopPropagation(); // don't trigger the row/card's play-on-click
+    addToQueue(item);
+  });
+  return b;
 }
 
 /* ------------------------------------------------------------------ shelves */
@@ -498,6 +511,7 @@ async function doSearch(term) {
         main.appendChild(el('div', 'row-sub', s.attributes.artistName || ''));
         row.appendChild(main);
         row.appendChild(el('span', 'row-dur', fmtTime((s.attributes.durationInMillis || 0) / 1000)));
+        row.appendChild(songAddButton(s));
         row.addEventListener('click', () => playWithToast(songIds, i));
         sec.appendChild(row);
       });
@@ -539,6 +553,7 @@ async function loadLibrary() {
         main.appendChild(el('div', 'row-sub', s.attributes.artistName || ''));
         row.appendChild(main);
         row.appendChild(el('span', 'row-dur', fmtTime((s.attributes.durationInMillis || 0) / 1000)));
+        row.appendChild(songAddButton(s));
         row.addEventListener('click', () => playWithToast(ids, i));
         box.appendChild(row);
       });
@@ -721,7 +736,113 @@ function queueRow(it, i, current) {
     Apple.exec(`MusicKit.getInstance().changeToMediaItem(MusicKit.getInstance().queue._queueItems[${i}].item).then(()=>"ok").catch(e=>"ERR "+e)`);
     toast('Jumping to “' + it.title + '”');
   });
+  if (!current) makeRowDraggable(row, i, it);
   return row;
+}
+
+/* drag-to-reorder: HTML5 drag on up-next rows; drop position decides
+   insert-before/after, then one splice-pair reorders the real queue */
+let dragRow = null; // {i, title} of the row currently being dragged
+
+function makeRowDraggable(row, i, it) {
+  row.draggable = true;
+  row.addEventListener('dragstart', (e) => {
+    dragRow = { i, title: it.title || '' };
+    row.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', 'q-row');
+  });
+  row.addEventListener('dragend', () => {
+    row.classList.remove('dragging');
+    dragRow = null;
+    document.querySelectorAll('.q-row.drop-before, .q-row.drop-after')
+      .forEach((r) => r.classList.remove('drop-before', 'drop-after'));
+  });
+  row.addEventListener('dragover', (e) => {
+    if (!dragRow || dragRow.i === i) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const r = row.getBoundingClientRect();
+    const before = (e.clientY - r.top) < r.height / 2;
+    row.classList.toggle('drop-before', before);
+    row.classList.toggle('drop-after', !before);
+  });
+  row.addEventListener('dragleave', () => row.classList.remove('drop-before', 'drop-after'));
+  row.addEventListener('drop', (e) => {
+    e.preventDefault();
+    row.classList.remove('drop-before', 'drop-after');
+    if (!dragRow || dragRow.i === i) return;
+    const r = row.getBoundingClientRect();
+    const target = i + (((e.clientY - r.top) < r.height / 2) ? 0 : 1);
+    if (target === dragRow.i || target === dragRow.i + 1) return; // no-op move
+    reorderQueue(dragRow.i, target, dragRow.title);
+    dragRow = null;
+  });
+}
+
+async function reorderQueue(src, dst, title) {
+  // dst is an absolute index in the PRE-removal array; after taking the row
+  // out, an insert point past the source shifts down by one. Keep every move
+  // inside the up-next region (>= pos+1) so the playing track never moves.
+  const js = `(() => { try { const q = MusicKit.getInstance().queue; const pos = q._position;
+    if (${src} <= pos) return 'ERR cannot move the playing track';
+    const e = q._queueItems[${src}];
+    q.spliceQueueItems(${src}, 1, [], true);
+    let j = ${dst}; if (j > ${src}) j--; j = Math.max(pos + 1, Math.min(j, q.length));
+    q.spliceQueueItems(j, 0, [e], true);
+    return 'OK'; } catch (e) { return 'ERR ' + (e && e.message || e); } })()`;
+  const r = await Apple.exec(js);
+  if (r && String(r).startsWith('ERR')) {
+    toast('Reorder failed: ' + String(r).slice(4).slice(0, 80));
+  } else {
+    toast('Moved “' + title + '” in the queue');
+  }
+  State.queueSig = ''; // force the next poll to rebuild the list
+  refreshQueue();
+}
+
+/* add-to-queue: '+' on song cards. Empty queue -> starts playing it;
+   otherwise the fetched song resource goes through mk.playLater (end). */
+async function addToQueue(item, label) {
+  const kind = kindOf(item);
+  if (kind !== 'song') { toast('Only songs can be queued'); return; }
+  const id = (item.attributes && item.attributes.playParams && item.attributes.playParams.catalogId)
+    || (item.attributes && item.attributes.playParams && item.attributes.playParams.id) || item.id;
+  const name = (item.attributes && item.attributes.name) || '';
+  const js = `(() => { try {
+    const mk = MusicKit.getInstance(); const q = mk.queue; const id = '${id}';
+    if (!q.isInitiated) {
+      return mk.setQueue({ songs: [id], startPlaying: true }).then(() => 'ok')
+        .catch(e => 'ERR ' + (e && e.message || e));
+    }
+    // playLater is a silent no-op in this playback build; the verified path is
+    // catalog resource -> new MusicKit.MediaItem() -> queue splice at the end
+    const add = (res) => {
+      if (!res) return Promise.resolve('ERR song not found in catalog');
+      const mi = new MusicKit.MediaItem(res);
+      q.spliceQueueItems(q.length, 0, [{ item: mi }], true);
+      return Promise.resolve(q.length > 0 ? 'ok' : 'ERR queue rejected the item');
+    };
+    const byId = mk.api.music('/v1/catalog/${Apple.sf}/songs/' + id)
+      .then(r => r.json.data[0]);
+    // library songs (i.* ids) are not in the catalog: match by name as fallback
+    const byName = mk.api.music('/v1/catalog/${Apple.sf}/search?limit=1&types=songs&term='
+      + encodeURIComponent(${JSON.stringify(name)}))
+      .then(r => { const d = r.json.results && r.json.results.songs && r.json.results.songs.data; return d && d[0]; })
+      .catch(() => null);
+    return byId
+      .catch(() => byName)
+      .then(add);
+  } catch (e) { return Promise.resolve('ERR ' + String(e)); } })()`;
+  let r;
+  try { r = await Apple.exec(js); } catch (e) { r = 'ERR ' + e; }
+  if (r && String(r).startsWith('ERR')) {
+    toast('Could not queue “' + (label || item.attributes.name) + '”: ' + String(r).slice(4).slice(0, 60));
+  } else {
+    toast('Added “' + (label || item.attributes.name) + '” to queue');
+  }
+  State.queueSig = '';
+  refreshQueue();
 }
 
 /* --------------------------------------------------------------- fullscreen */
