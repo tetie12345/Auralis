@@ -18,29 +18,29 @@
     </div>
     <div class="titlebar-drag"></div>
     <div class="win-controls">
-      <button id="w-min" title="Minimize">&#x2500;</button>
-      <button id="w-max" title="Maximize">&#x25A1;</button>
-      <button id="w-close" title="Close">&#x2715;</button>
+      <button id="w-min" title="Minimize"><span data-ico="minus" data-ico-size="13"></span></button>
+      <button id="w-max" title="Maximize"><span data-ico="square" data-ico-size="12"></span></button>
+      <button id="w-close" title="Close"><span data-ico="x" data-ico-size="13"></span></button>
     </div>
   </header>
 
   <div id="shell">
     <nav id="sidebar">
       <button class="nav-item active" data-view="home">
-        <span class="nav-ico">&#x2302;</span><span>Home</span>
+        <span class="nav-ico" data-ico="home" data-ico-size="17"></span><span>Home</span>
       </button>
       <button class="nav-item" data-view="search">
-        <span class="nav-ico">&#x2315;</span><span>Search</span>
+        <span class="nav-ico" data-ico="search" data-ico-size="17"></span><span>Search</span>
       </button>
       <button class="nav-item" data-view="library">
-        <span class="nav-ico">&#x2261;</span><span>Library</span>
+        <span class="nav-ico" data-ico="library" data-ico-size="17"></span><span>Library</span>
       </button>
       <button class="nav-item" data-view="now">
-        <span class="nav-ico">&#x25CE;</span><span>Now Playing</span>
+        <span class="nav-ico" data-ico="disc" data-ico-size="17"></span><span>Now Playing</span>
       </button>
       <div class="sidebar-gap"></div>
       <button class="nav-item" data-view="settings">
-        <span class="nav-ico">&#x2699;</span><span>Settings</span>
+        <span class="nav-ico" data-ico="settings" data-ico-size="17"></span><span>Settings</span>
       </button>
       <div id="auth-chip" class="auth-chip off"><span class="dot"></span><span id="auth-label">Offline</span></div>
     </nav>
@@ -158,9 +158,9 @@
     </div>
     <div class="pb-center">
       <div class="pb-controls">
-        <button id="pb-prev" title="Previous">&#x23EE;</button>
-        <button id="pb-play" title="Play/Pause">&#x25B6;</button>
-        <button id="pb-next" title="Next">&#x23ED;</button>
+        <button id="pb-prev" title="Previous"><span data-ico="skip-back" data-ico-size="20"></span></button>
+        <button id="pb-play" title="Play/Pause"><span data-ico="play" data-ico-size="23"></span></button>
+        <button id="pb-next" title="Next"><span data-ico="skip-forward" data-ico-size="20"></span></button>
       </div>
       <div class="pb-progress">
         <span id="pb-time">0:00</span>
@@ -169,12 +169,12 @@
       </div>
     </div>
     <div class="pb-right">
-      <button id="pb-lyrics" title="Lyrics (L)">&#x266A;</button>
-      <button id="pb-queue" title="Up next">&#x2261;</button>
-      <button id="pb-shuffle" title="Shuffle">&#x29EB;</button>
-      <button id="pb-viz" title="Visualizer (V)">&#x2588;</button>
-      <button id="pb-full" title="Fullscreen (F)">&#x26F6;</button>
-      <svg id="pb-vol-ico" width="16" height="16" viewBox="0 0 16 16"><path d="M2 6h3l4-3v10l-4-3H2z" fill="currentColor"/><path d="M11 5c1.2 1.6 1.2 4.4 0 6" stroke="currentColor" fill="none" stroke-width="1.4" stroke-linecap="round"/></svg>
+      <button id="pb-lyrics" title="Lyrics (L)"><span data-ico="music" data-ico-size="16"></span></button>
+      <button id="pb-queue" title="Up next"><span data-ico="list-music" data-ico-size="16"></span></button>
+      <button id="pb-shuffle" title="Shuffle"><span data-ico="shuffle" data-ico-size="16"></span></button>
+      <button id="pb-viz" title="Visualizer (V)"><span data-ico="activity" data-ico-size="16"></span></button>
+      <button id="pb-full" title="Fullscreen (F)"><span data-ico="maximize" data-ico-size="16"></span></button>
+      <span id="pb-vol-ico" data-ico="volume-2" data-ico-size="16"></span>
       <input id="pb-vol" type="range" min="0" max="100" value="80">
     </div>
   </footer>
@@ -184,6 +184,7 @@
   <script src="visualizer.js"></script>
   <script src="palette.js"></script>
   <script src="lyrics.js"></script>
+  <script src="icons.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

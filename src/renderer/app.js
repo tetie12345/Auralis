@@ -556,7 +556,7 @@ function handleState(s) {
   const timeAdvanced = State.lastTime != null && s.time > State.lastTime + 0.01 && s.time > 0;
   State.lastTime = s.time;
   State.playing = s.state === 2 || timeAdvanced;
-  $('#pb-play').innerHTML = State.playing ? '&#x23F8;' : '&#x25B6;';
+  $('#pb-play').innerHTML = window.icon(State.playing ? 'pause' : 'play', 23);
   window.auralis.audioPaused(!State.playing);
   State.dur = s.dur || (s.item ? s.item.ms / 1000 : 0);
   if (!State.seeking) {
@@ -727,7 +727,7 @@ function toggleFullscreen() {
 function togglePlay() {
   const wasPlaying = State.playing;
   if (!wasPlaying && !State.item) { toast('Nothing to play yet'); return; }
-  $('#pb-play').innerHTML = wasPlaying ? '&#x25B6;' : '&#x23F8;';
+  $('#pb-play').innerHTML = window.icon(wasPlaying ? 'play' : 'pause', 23);
   // IIFE: a bare `const mk` would pollute the webview's global scope and make
   // every subsequent command throw "already declared"
   Apple.exec(`(() => { const mk=MusicKit.getInstance(); try { return (${wasPlaying ? 'mk.pause()' : 'mk.play()'}).then(()=>'ok').catch(e=>'ERR '+e); } catch(e) { return 'ERR '+String(e); } })()`)

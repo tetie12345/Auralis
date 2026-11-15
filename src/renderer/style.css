@@ -151,6 +151,11 @@ input:focus, select:focus { border-color: var(--accent); }
   color: var(--text);
 }
 .nav-ico { width: 20px; text-align: center; font-size: 15px; }
+
+/* lucide icons (icons.js): placeholders are flex-centered svgs */
+[data-ico] { display: inline-flex; align-items: center; justify-content: center; }
+[data-ico] svg { display: block; }
+.pb-controls button, .pb-right button, .win-controls button { display: flex; align-items: center; justify-content: center; }
 .sidebar-gap { flex: 1; }
 .auth-chip {
   display: flex; align-items: center; gap: 8px;
