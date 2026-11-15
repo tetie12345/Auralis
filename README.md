@@ -2,13 +2,9 @@
 
 A futuristic Apple Music client for Linux desktops.
 
-![Home](docs/screenshots/home-1.png)
-![Home scrolled](docs/screenshots/home-2.png)
-![Home more](docs/screenshots/home-3.png)
-![Home bottom](docs/screenshots/home-4.png)
-![Now Playing — Spiritbox](docs/screenshots/now-playing-spiritbox.png)
-![Now Playing — Imminence](docs/screenshots/now-playing-imminence.png)
-![Now Playing — Asking Alexandria](docs/screenshots/now-playing-asking-alexandria.png)
+![Home](docs/screenshots/home.png)
+![Now Playing — Karmanjakah](docs/screenshots/now-playing-karmanjakah.png)
+![Now Playing — Asking Alexandria](docs/screenshots/now-playing-dark-void.png)
 
 *Home with the Liquid Glass UI, and Now Playing — note how the ambient glow,
 visualizer and accents follow the album artwork of each track.*
