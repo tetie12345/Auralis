@@ -11,5 +11,6 @@ contextBridge.exposeInMainWorld('auralis', {
   audioSource: () => ipcRenderer.invoke('audio:source'),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
   fetchArt: (url) => ipcRenderer.invoke('art:fetch', url),
+  fanSync: (payload) => ipcRenderer.invoke('fansync', payload),
   on: (channel, fn) => ipcRenderer.on(channel, (_e, data) => fn(data)),
 });

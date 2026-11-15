@@ -1,6 +1,7 @@
 'use strict';
 const { app, BrowserWindow, ipcMain, shell, session } = require('electron');
 const path = require('path');
+const fs = require('fs');
 const AudioCapture = require('./audio');
 
 let win = null;
@@ -123,6 +124,22 @@ ipcMain.handle('open-external', (_e, url) => {
 });
 
 const artCache = new Map(); // url -> dataURL
+
+// ------------------------------------------------ IPC: fan RGB (legion-rgb sync)
+// Writes the current palette accents to ~/.local/share/auralis/fansync.json;
+// the ~/.local/bin/legion-sync-auralis.py daemon watches that file and drives
+// the case-fan lighting zones. Toggled by Settings.fanSync in the renderer.
+ipcMain.handle('fansync', (_e, payload) => {
+  try {
+    const dir = path.join(process.env.HOME || '/', '.local', 'share', 'auralis');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'fansync.json'), JSON.stringify(payload));
+    return true;
+  } catch (err) {
+    console.error('fansync write failed:', err);
+    return false;
+  }
+});
 
 ipcMain.handle('art:fetch', async (_e, url) => {
   if (artCache.has(url)) return artCache.get(url);

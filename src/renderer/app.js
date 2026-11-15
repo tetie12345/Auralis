@@ -32,12 +32,13 @@ const Settings = {
   accent: 'artwork',
   lyrSize: 19,
   source: '',
+  fanSync: false,
   load() {
     try { Object.assign(this, JSON.parse(localStorage.getItem('auralis:settings') || '{}')); } catch {}
   },
   save() {
     localStorage.setItem('auralis:settings', JSON.stringify({
-      viz: this.viz, accent: this.accent, lyrSize: this.lyrSize, source: this.source,
+      viz: this.viz, accent: this.accent, lyrSize: this.lyrSize, source: this.source, fanSync: this.fanSync,
     }));
   },
 };
@@ -279,9 +280,23 @@ function applyPalette(dataUrl) {
     r.setProperty('--tint', pal.tint);
     r.setProperty('--glow', pal.glow || 'rgba(109,125,255,0.45)');
     window.__vizPalette = pal.viz;
+    fanPush(pal);
     paintRange($('#pb-seek'));
     paintRange($('#pb-vol'));
   });
+}
+
+/* fan RGB sync: push the current accent pair to the legion-rgb daemon */
+let fanPal = { accent: null, accent2: null, sent: false };
+function fanPush(pal) {
+  if (!Settings.fanSync || !pal || !pal.accent) return;
+  if (fanPal.sent && pal.accent === fanPal.accent && pal.accent2 === fanPal.accent2) return;
+  fanPal = { accent: pal.accent, accent2: pal.accent2, sent: true };
+  try { window.auralis.fanSync({ enabled: true, accent: pal.accent, accent2: pal.accent2 }); } catch {}
+}
+function fanDisable() {
+  fanPal = { accent: null, accent2: null, sent: false };
+  try { window.auralis.fanSync({ enabled: false }); } catch {}
 }
 
 function fixedPalette() {
@@ -291,6 +306,7 @@ function fixedPalette() {
   r.setProperty('--tint', 'rgba(109,125,255,0.10)');
   r.setProperty('--glow', 'rgba(109,125,255,0.45)');
   window.__vizPalette = { accent: [110, 125, 255], accent2: [155, 140, 255], bg: [10, 12, 18] };
+  fanPush({ accent: '#6d7dff', accent2: '#9b8cff' });
 }
 
 /* paint the filled portion of range inputs with the accent color */
@@ -618,6 +634,7 @@ function applySettings() {
   $('#set-viz').value = Settings.viz;
   $('#set-accent').value = Settings.accent;
   $('#set-lyrsize').value = Settings.lyrSize;
+  $('#set-fansync').checked = !!Settings.fanSync;
   document.documentElement.style.setProperty('--lyr-size', Settings.lyrSize + 'px');
   if (Settings.accent === 'indigo') fixedPalette();
 }
@@ -813,6 +830,18 @@ async function init() {
   $('#set-viz').addEventListener('change', (e) => { Settings.viz = e.target.value; Settings.save(); applySettings(); });
   $('#set-accent').addEventListener('change', (e) => { Settings.accent = e.target.value; Settings.save(); applySettings(); if (Settings.accent === 'artwork' && State.item) refreshNowPlaying(); });
   $('#set-lyrsize').addEventListener('input', (e) => { Settings.lyrSize = +e.target.value; document.documentElement.style.setProperty('--lyr-size', Settings.lyrSize + 'px'); Settings.save(); });
+  $('#set-fansync').addEventListener('change', (e) => {
+    Settings.fanSync = e.target.checked;
+    Settings.save();
+    if (Settings.fanSync) {
+      // re-push whatever palette is live right now (artwork or fixed indigo)
+      fanPal.sent = false;
+      const cs = getComputedStyle(document.documentElement);
+      fanPush({ accent: cs.getPropertyValue('--accent').trim(), accent2: cs.getPropertyValue('--accent2').trim() });
+    } else {
+      fanDisable();
+    }
+  });
 
   // audio source picker
   window.auralis.audioSources().then((srcs) => {
