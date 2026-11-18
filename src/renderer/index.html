@@ -109,6 +109,20 @@
         <div id="viz-strip"><canvas id="viz-main"></canvas></div>
       </section>
 
+      <!-- Album page -->
+      <section id="view-album" class="view hidden">
+        <button id="album-back" class="btn-back"><span data-ico="arrow-left" data-ico-size="15"></span> Back</button>
+        <div id="album-head"></div>
+        <div id="album-tracks"></div>
+      </section>
+
+      <!-- Artist page -->
+      <section id="view-artist" class="view hidden">
+        <button id="artist-back" class="btn-back"><span data-ico="arrow-left" data-ico-size="15"></span> Back</button>
+        <div id="artist-head"></div>
+        <div id="artist-content"></div>
+      </section>
+
       <!-- Settings -->
       <section id="view-settings" class="view hidden">
         <h2 class="view-title">Settings</h2>
@@ -135,6 +149,16 @@
             <select id="set-accent">
               <option value="artwork">Follow album artwork</option>
               <option value="indigo">Fixed indigo</option>
+            </select>
+          </div>
+          <div class="setting-row">
+            <label>Song fade in/out</label>
+            <select id="set-fade">
+              <option value="0">Off</option>
+              <option value="2">2 seconds</option>
+              <option value="4">4 seconds</option>
+              <option value="6">6 seconds</option>
+              <option value="8">8 seconds</option>
             </select>
           </div>
           <div class="setting-row">
@@ -183,6 +207,7 @@
     </div>
   </footer>
 
+  <div id="ctx-menu" class="hidden"></div>
   <div id="toast"></div>
 
   <script src="visualizer.js"></script>
