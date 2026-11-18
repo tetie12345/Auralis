@@ -33,13 +33,12 @@ const Settings = {
   lyrSize: 19,
   source: '',
   fanSync: false,
-  fade: 0,
   load() {
     try { Object.assign(this, JSON.parse(localStorage.getItem('auralis:settings') || '{}')); } catch {}
   },
   save() {
     localStorage.setItem('auralis:settings', JSON.stringify({
-      viz: this.viz, accent: this.accent, lyrSize: this.lyrSize, source: this.source, fanSync: this.fanSync, fade: this.fade,
+      viz: this.viz, accent: this.accent, lyrSize: this.lyrSize, source: this.source, fanSync: this.fanSync,
     }));
   },
 };
@@ -169,10 +168,6 @@ const State = {
   seeking: false,
   webviewShown: false,
   lyricKey: '',
-  userVol: null,
-  lastVol: null,
-  fadeActive: false,
-  backView: 'home',
 };
 
 /* -------------------------------------------------------------------- views */
@@ -416,6 +411,8 @@ async function openItem(item) {
     openAlbumPage(item);
   } else if (kind === 'artist') {
     openArtistPage(item);
+  } else if (kind === 'playlist') {
+    openPlaylistPage(item);
   } else {
     toast('Loading ' + (item.attributes.name || '') + '…');
     const ids = await trackIds(item);
@@ -621,10 +618,6 @@ function handleState(s) {
     State.item = it;
     State.lyricKey = '';
     Lyrics.reset();
-    // the volume may be mid-fade at the boundary: if fading is on, the fade-in
-    // ramps it back up from ~0; if it's off, restore the user's volume now
-    State.fadeActive = false;
-    if (!(+Settings.fade > 0)) endFade(true);
     refreshNowPlaying();
     highlightPlayingRow(it.cid || it.id);
   } else if (it) {
@@ -636,50 +629,14 @@ function handleState(s) {
     $('#pb-title').textContent = 'Nothing playing';
     $('#pb-artist').textContent = '';
   }
-  // volume reflect once (skip while a fade is driving the real volume)
-  if (State.userVol == null) State.userVol = s.vol;
-  if (!State.fadeActive && !volumeDragging && Math.abs(($('#pb-vol').value / 100) - s.vol) > 0.02) {
+  // volume reflect once
+  if (Math.abs(($('#pb-vol').value / 100) - s.vol) > 0.02 && !volumeDragging) {
     $('#pb-vol').value = Math.round(s.vol * 100);
   }
-  fadeTick(s);
 }
 
 function highlightPlayingRow(id) {
   $$('.row-song').forEach((r) => r.classList.toggle('playing', r.dataset.id === id));
-}
-
-/* --------------------------------------------------------------- song fade */
-/* Linear ramp on mk.volume over the last/first `Settings.fade` seconds
-   (smoothstep curve so the ends of the ramp don't pop). State.userVol is the
-   slider volume; the faded value never replaces it. */
-function fadeTick(s) {
-  const want = +Settings.fade || 0;
-  if (!want || !State.playing || !s.dur || s.dur < want * 1.2) {
-    if (State.fadeActive) endFade(true);
-    return;
-  }
-  const remain = s.dur - s.time;
-  let f = 1;
-  if (remain < want) f = Math.max(0, remain / want);
-  else if (s.time < want) f = Math.max(0, s.time / want);
-  if (f >= 1) {
-    if (State.fadeActive) endFade(true);
-    return;
-  }
-  if (State.userVol == null) return;
-  const target = Math.round(State.userVol * f * f * (3 - 2 * f) * 1000) / 1000;
-  State.fadeActive = true;
-  if (Math.abs(target - (State.lastVol == null ? -1 : State.lastVol)) > 0.004) {
-    State.lastVol = target;
-    Apple.setVol(target);
-  }
-}
-function endFade(restore) {
-  State.fadeActive = false;
-  if (restore && State.userVol != null && State.lastVol != null && State.lastVol < State.userVol - 0.01) {
-    Apple.setVol(State.userVol);
-  }
-  State.lastVol = State.userVol;
 }
 
 /* ------------------------------------------------------------------ webview */
@@ -702,7 +659,6 @@ function applySettings() {
   $('#set-accent').value = Settings.accent;
   $('#set-lyrsize').value = Settings.lyrSize;
   $('#set-fansync').checked = !!Settings.fanSync;
-  $('#set-fade').value = String(+Settings.fade || 0);
   document.documentElement.style.setProperty('--lyr-size', Settings.lyrSize + 'px');
   if (Settings.accent === 'indigo') fixedPalette();
 }
@@ -929,9 +885,17 @@ async function queueSongs(items, front, label) {
         .then(() => 'OK ' + SPECS.length).catch(e => 'ERR ' + (e && e.message || e));
     }
     return Promise.all(SPECS.map(resolveOne)).then(list => {
-      const entries = list.filter(Boolean).map(res => ({ item: new MusicKit.MediaItem(res) }));
+      const entries = list.filter(Boolean).map(res => {
+        const mi = new MusicKit.MediaItem(res);
+        // native queue items carry their album container; without it the
+        // player can flip metadata without ever streaming the audio
+        const alb = res.relationships && res.relationships.albums && res.relationships.albums.data && res.relationships.albums.data[0];
+        if (alb) { try { mi._container = { id: alb.id, name: res.attributes.albumName || '' }; } catch (e) {} }
+        return { item: mi };
+      });
       if (!entries.length) return 'ERR no playable versions found';
-      const at = FRONT ? Math.max(0, (q._position || -1) + 1) : q.length;
+      // NOTE: q._position can legitimately be 0 — don't coerce it with || -1
+      const at = FRONT ? Math.max(0, (q._position == null ? -1 : q._position) + 1) : q.length;
       q.spliceQueueItems(at, 0, entries, true);
       return 'OK ' + entries.length;
     }).catch(e => 'ERR ' + (e && e.message || e));
@@ -979,6 +943,7 @@ function itemMenu(e, item) {
     ]);
   } else if (kind === 'playlist') {
     openCtxMenu(e.clientX, e.clientY, [
+      { label: 'Open playlist', fn: () => openPlaylistPage(item) },
       { label: 'Queue playlist', fn: () => queuePlaylist(item, false) },
       { label: 'Play playlist next', fn: () => queuePlaylist(item, true) },
     ]);
@@ -999,15 +964,7 @@ async function queueAlbum(item, front) {
 async function queuePlaylist(item, front) {
   const name = (item.attributes && item.attributes.name) || 'playlist';
   toast('Loading “' + name + '”…');
-  let tracks = null;
-  try {
-    const id = item.id;
-    const path = id.startsWith('p.')
-      ? `/v1/me/library/playlists/${id}/tracks?limit=100`
-      : `/v1/catalog/${Apple.sf}/playlists/${id}/tracks?limit=100`;
-    const res = await Apple.api(path);
-    tracks = ((res && res.data) || []).filter((t) => t.attributes);
-  } catch {}
+  const { tracks } = await fetchPlaylist(item.id);
   if (!tracks || !tracks.length) { toast('Could not load this playlist'); return; }
   queueSongs(tracks, front, name + ' (' + tracks.length + ' tracks)');
 }
@@ -1097,6 +1054,57 @@ function songRow(s, ids, i) {
   row.addEventListener('click', () => playWithToast(ids, i));
   row.addEventListener('contextmenu', (e) => { e.preventDefault(); itemMenu(e, s); });
   return row;
+}
+
+async function fetchPlaylist(id) {
+  const isLib = id.startsWith('p.');
+  const metaPath = isLib ? `/v1/me/library/playlists/${id}` : `/v1/catalog/${Apple.sf}/playlists/${id}`;
+  const trPath = isLib ? `/v1/me/library/playlists/${id}/tracks?limit=100` : `/v1/catalog/${Apple.sf}/playlists/${id}/tracks?limit=100`;
+  const [meta, tr] = await Promise.all([Apple.api(metaPath), Apple.api(trPath)]);
+  return {
+    pl: (meta.data && meta.data[0]) || null,
+    tracks: ((tr.data || [])).filter((t) => t.attributes),
+  };
+}
+
+async function openPlaylistPage(item) {
+  rememberBack();
+  setView('playlist');
+  const head = $('#playlist-head');
+  const box = $('#playlist-tracks');
+  head.innerHTML = '';
+  box.innerHTML = '<p class="muted">Loading playlist…</p>';
+  try {
+    const { pl, tracks } = await fetchPlaylist(item.id);
+    if (!pl) { box.innerHTML = '<p class="muted">Could not load this playlist.</p>'; return; }
+    const a = pl.attributes || {};
+    const art = el('img', 'page-art');
+    const src = await artSrc(a, 300);
+    if (src) art.src = src;
+    head.appendChild(art);
+    const info = el('div', 'page-info');
+    info.appendChild(el('h2', 'page-title', a.name || ''));
+    info.appendChild(el('div', 'page-sub', a.curatorName || a.ownerDisplayName || ''));
+    if (a.description && (a.description.standard || a.description.short)) {
+      const d = el('div', 'page-meta', a.description.standard || a.description.short);
+      d.style.maxWidth = '520px';
+      info.appendChild(d);
+    }
+    const total = (tracks || []).reduce((s, t) => s + ((t.attributes.durationInMillis || 0) / 1000), 0);
+    info.appendChild(el('div', 'page-meta', [tracks.length + ' tracks', fmtTime(total)].filter(Boolean).join(' · ')));
+    const ids = tracks.map((t) => (t.attributes.playParams && t.attributes.playParams.catalogId) ||
+      (t.attributes.playParams && t.attributes.playParams.id) || t.id);
+    info.appendChild(pageActions(
+      () => playWithToast(ids),
+      () => { Apple.exec('MusicKit.getInstance().shuffleMode=1'); playWithToast(ids); toast('Shuffling playlist'); },
+      () => queueSongs(tracks, false, a.name)));
+    head.appendChild(info);
+    box.innerHTML = '';
+    tracks.forEach((t, i) => box.appendChild(songRow(t, ids, i)));
+    box.style.flexDirection = 'column';
+  } catch (e) {
+    box.innerHTML = '<p class="muted">Could not load playlist: ' + (e.message || e) + '</p>';
+  }
 }
 
 async function openArtistPage(item) {
@@ -1239,11 +1247,7 @@ async function init() {
   $('#pb-seek').addEventListener('input', () => { State.seeking = true; $('#pb-time').textContent = fmtTime(($('#pb-seek').value / 1000) * State.dur); paintRange($('#pb-seek')); });
   $('#pb-seek').addEventListener('change', () => { Apple.seek(($('#pb-seek').value / 1000) * State.dur); State.seeking = false; });
 
-  $('#pb-vol').addEventListener('input', () => {
-    State.userVol = $('#pb-vol').value / 100;
-    if (!State.fadeActive) { Apple.setVol(State.userVol); State.lastVol = State.userVol; }
-    paintRange($('#pb-vol'));
-  });
+  $('#pb-vol').addEventListener('input', () => { Apple.setVol($('#pb-vol').value / 100); paintRange($('#pb-vol')); });
   $('#pb-lyrics').addEventListener('click', () => { setView('now'); showNowTab('lyrics'); });
   $('#pb-queue').addEventListener('click', () => { setView('now'); showNowTab('queue'); });
   $('#pb-viz').addEventListener('click', cycleViz);
@@ -1257,15 +1261,9 @@ async function init() {
   });
   $('#tab-lyrics').addEventListener('click', () => showNowTab('lyrics'));
   $('#tab-queue').addEventListener('click', () => showNowTab('queue'));
-  $('#set-fade').addEventListener('change', (e) => {
-    Settings.fade = +e.target.value;
-    Settings.save();
-    // leaving fade mid-ramp would leave the volume parked low
-    if (!(Settings.fade > 0)) endFade(true);
-    toast(Settings.fade > 0 ? 'Song fade: ' + Settings.fade + 's' : 'Song fade off');
-  });
   $('#album-back').addEventListener('click', () => setView(State.backView || 'home'));
   $('#artist-back').addEventListener('click', () => setView(State.backView || 'home'));
+  $('#playlist-back').addEventListener('click', () => setView(State.backView || 'home'));
   window.addEventListener('click', closeCtxMenu);
   window.addEventListener('blur', closeCtxMenu);
   $('#ctx-menu').addEventListener('contextmenu', (e) => e.preventDefault());
@@ -1327,7 +1325,7 @@ async function init() {
     else if (e.key === 'l' || e.key === 'L') { setView('now'); showNowTab('lyrics'); }
     else if (e.key === 'Escape') {
       if (document.body.classList.contains('fullscreen')) toggleFullscreen();
-      else if (State.view === 'album' || State.view === 'artist') setView(State.backView || 'home');
+      else if (State.view === 'album' || State.view === 'artist' || State.view === 'playlist') setView(State.backView || 'home');
       else if (State.webviewShown) hideWebview();
     }
   });
